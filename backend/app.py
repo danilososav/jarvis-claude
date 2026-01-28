@@ -7,6 +7,7 @@ from db import engine, test_connection
 from claude_handler import ClaudeHandler
 from sqlalchemy import text
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 
 load_dotenv('config/.env')
 
@@ -18,6 +19,29 @@ CORS(app)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 claude = ClaudeHandler(ANTHROPIC_API_KEY)
+
+def fuzzy_match_cliente(cliente_buscado, threshold=0.6):
+    """Buscar cliente por similitud de nombre"""
+    try:
+        with engine.connect() as conn:
+            stmt = text("SELECT DISTINCT nombre_anunciante FROM dim_anunciante_perfil WHERE nombre_anunciante IS NOT NULL")
+            nombres = conn.execute(stmt).fetchall()
+            
+            mejores_matches = []
+            for nombre_row in nombres:
+                nombre = nombre_row[0]
+                ratio = SequenceMatcher(None, cliente_buscado.upper(), nombre.upper()).ratio()
+                if ratio >= threshold:
+                    mejores_matches.append((nombre, ratio))
+            
+            if mejores_matches:
+                mejores_matches.sort(key=lambda x: x[1], reverse=True)
+                return mejores_matches[0][0]
+            return None
+    except Exception as e:
+        logger.error(f"Error fuzzy match: {e}")
+        return None
+
 
 @app.before_request
 def check_db():
@@ -49,6 +73,9 @@ def query():
         elif any(w in query_lower for w in ["perfil", "quién es", "como es", "empresa"]):
             query_type = "perfil"
             rows = get_perfil_enriched(user_query)
+        elif any(w in query_lower for w in ["perfil", "quién es", "como es", "empresa", "tipo", "caracteristic"]):
+            query_type = "perfil_completo"
+            rows = get_datos_cruzados_enriched(user_query)
         elif any(w in query_lower for w in ["tendencia", "crecimiento", "variación", "cambio"]):
             query_type = "tendencia"
             rows = get_tendencia_enriched(user_query)
@@ -172,7 +199,8 @@ def get_comparacion_enriched(query):
         return []
 
 def get_perfil_enriched(query):
-    palabras = query.split()
+    query_limpio = query.replace('?', '').replace('!', '').replace(',', '')
+    palabras = query_limpio.split()
     cliente = " ".join([p for p in palabras if p.isupper()])
     
     if not cliente:
@@ -184,8 +212,7 @@ def get_perfil_enriched(query):
                 SELECT 
                     d.nombre_canonico,
                     SUM(f.facturacion)::float as facturacion_total,
-                    COUNT(DISTINCT (f.anio::text || '-' || f.mes::text)) as meses_activo
-                    COUNT(DISTINCT f.familia) as familias_productos,
+                    COUNT(DISTINCT (f.anio::text || '-' || f.mes::text)) as meses_activo,
                     MAX(f.anio) as ultimo_año,
                     AVG(f.facturacion)::float as promedio_mensual
                 FROM dim_anunciante d
@@ -194,7 +221,7 @@ def get_perfil_enriched(query):
                 GROUP BY d.anunciante_id, d.nombre_canonico
             """)
             rows = conn.execute(stmt, {"cliente": f"%{cliente}%"}).fetchall()
-            return [{"cliente": r[0], "facturacion": float(r[1]) if r[1] else 0, "meses_activo": r[2] or 0, "familias": r[3] or 0, "ultimo_año": r[4], "promedio_mensual": float(r[5]) if r[5] else 0} for r in rows]
+            return [{"cliente": r[0], "facturacion": float(r[1]) if r[1] else 0, "meses_activo": r[2] or 0, "ultimo_año": r[3], "promedio_mensual": float(r[4]) if r[4] else 0} for r in rows]
     except Exception as e:
         logger.error(f"Error Perfil: {e}")
         return []
@@ -230,6 +257,68 @@ def get_tendencia_enriched(query):
             return result
     except Exception as e:
         logger.error(f"Error Tendencia: {e}")
+        return []
+    
+def get_datos_cruzados_enriched(query):
+    query_limpio = query.replace('?', '').replace('!', '').replace(',', '')
+    palabras = query_limpio.split()
+    cliente = " ".join([p for p in palabras if p.isupper()])
+    
+    if not cliente:
+        return []
+    
+    cliente_match = fuzzy_match_cliente(cliente)
+    if not cliente_match:
+        cliente_match = cliente
+    
+    try:
+        with engine.connect() as conn:
+            stmt = text("""
+                SELECT 
+                    d.nombre_canonico,
+                    p.rubro_principal,
+                    p.que_tipo_de_empresa_es,
+                    p.tamano_de_la_empresa_cantidad_de_empleados,
+                    p.cluster,
+                    p.en_que_medios_invierte_la_empresa_principalmente,
+                    p.la_empresa_invierte_en_marketing_digital,
+                    p.la_empresa_tiene_un_crm,
+                    p.cultura,
+                    p.competitividad,
+                    p.estructura,
+                    p.ejecucion,
+                    p.inversion,
+                    SUM(f.facturacion)::float as facturacion_total,
+                    AVG(f.facturacion)::float as promedio_mensual
+                FROM dim_anunciante d
+                LEFT JOIN dim_anunciante_perfil p ON d.anunciante_id = p.anunciante_id
+                LEFT JOIN fact_facturacion f ON d.anunciante_id = f.anunciante_id AND f.facturacion > 0
+                WHERE UPPER(d.nombre_canonico) LIKE UPPER(:cliente)
+                GROUP BY d.anunciante_id, d.nombre_canonico, p.id, p.rubro_principal, p.que_tipo_de_empresa_es, 
+                         p.tamano_de_la_empresa_cantidad_de_empleados, p.cluster, p.en_que_medios_invierte_la_empresa_principalmente,
+                         p.la_empresa_invierte_en_marketing_digital, p.la_empresa_tiene_un_crm, p.cultura, p.competitividad,
+                         p.estructura, p.ejecucion, p.inversion, p.id
+            """)
+            rows = conn.execute(stmt, {"cliente": f"%{cliente}%"}).fetchall()
+            return [{
+                "cliente": r[0],
+                "rubro": r[1],
+                "tipo_empresa": r[2],
+                "tamaño": r[3],
+                "cluster": r[4],
+                "medios": r[5],
+                "digital": r[6],
+                "crm": r[7],
+                "cultura": r[8],
+                "competitividad": r[9],
+                "estructura": r[10],
+                "ejecucion": r[11],
+                "inversion": r[12],
+                "facturacion": float(r[13]) if r[13] else 0,
+                "promedio_mensual": float(r[14]) if r[14] else 0
+            } for r in rows]
+    except Exception as e:
+        logger.error(f"Error Datos Cruzados: {e}")
         return []
 
 @app.route('/api/health', methods=['GET'])

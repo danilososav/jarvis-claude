@@ -2,6 +2,7 @@ import logging
 from anthropic import Anthropic
 from typing import Dict, Any
 
+
 logger = logging.getLogger(__name__)
 
 class ClaudeHandler:
@@ -24,6 +25,7 @@ class ClaudeHandler:
             "facturacion": "Monto exacto, si es Top 5, observación relevante",
             "comparacion": "Diferencia %, ganador, estrategias diferenciadas",
             "perfil": "Características empresa, cluster, tamaño, potencial",
+            "perfil_completo": "Integra facturación + perfil AdLens. Describe: rubro, tamaño, cluster, inversión en medios, digital, CRM, scores. Resume en 4-5 oraciones.",
         }
         
         hint = context_hints.get(query_type, "Responde clara y profesionalmente")
