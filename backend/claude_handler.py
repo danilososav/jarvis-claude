@@ -32,6 +32,9 @@ class ClaudeHandler:
             "nivel_confianza": "Agrupa clientes por desconfianza. Identifica si desconfiados facturan menos. Resume tendencia. 3-4 oraciones.",
             "inversion_vs_facturacion": "Calcula ratio facturación/inversión. Analiza ROI. Resume en 4-5 oraciones con recomendaciones.",
             "arena_digital": "Facturación en Arena Distribución de Contenido - ON de empresas que invierten en digital. Lista top 5 con facturación total, promedio mensual y años activo. Resume tendencia. 4-5 oraciones.",
+            "desconfiados_con_inversion": "Clientes muy desconfiados pero con inversión alta en medios. Analiza si el esfuerzo de convencimiento justifica la inversión. 4-5 oraciones con recomendación.",
+            "cliente_especifico": "Análisis ON vs OFF del cliente. Desglose por arena, facturación total y mix de canales. Resume porcentaje ON/OFF. 5-6 oraciones.",
+            "atributo_adlens_arena": "Clientes con atributo específico (Valiente, Conservadora, etc) en arena particular. Facturación total, promedio, inversión TV. 4-5 oraciones.",
         }
         
         hint = context_hints.get(query_type, "Responde clara y profesionalmente")

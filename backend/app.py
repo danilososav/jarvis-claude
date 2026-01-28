@@ -90,6 +90,29 @@ def query():
             rows = get_facturacion_por_arena_e_inversion_digital(user_query)
             logger.info(f"🔍 Detectado: arena_digital - rows: {len(rows)}")
         
+
+             # Atributo AdLens + Arena
+        elif any(w in query_lower for w in ["valiente", "conservadora", "discreta", "arriesgada"]) and \
+            any(w in query_lower for w in ["creatividad", "contenido", "arena"]):
+            query_type = "atributo_adlens_arena"
+            rows = get_clientes_por_atributo_adlens_arena(user_query)
+            logger.info(f"🔍 Detectado: atributo_adlens_arena - rows: {len(rows)}")
+
+        # Cliente específico ON/OFF
+        elif any(w in query_lower for w in ["superseis", "pechugon", "la blanca", "retail"]) or \
+            (any(c.isupper() for c in user_query.split()[0]) and \
+            any(w in query_lower for w in ["on", "off", "digital", "mix", "desglose", "porcentaje"])):
+            query_type = "cliente_especifico"
+            rows = get_analisis_cliente_especifico(user_query)
+            logger.info(f"🔍 Detectado: cliente_especifico - rows: {len(rows)}")
+
+       # Desconfiados con inversión alta
+        elif any(w in query_lower for w in ["desconfiado", "confianza"]) and \
+            any(w in query_lower for w in ["inversion", "inversión", "afuera", "gastan"]):
+            query_type = "desconfiados_con_inversion"
+            rows = get_desconfiados_con_inversion_alta(user_query)
+            logger.info(f"🔍 Detectado: desconfiados_con_inversion - rows: {len(rows)}")
+        
         # 4. Clientes por cluster
         elif "cluster" in query_lower and any(c.isdigit() for c in user_query):
             query_type = "clientes_cluster"
@@ -801,6 +824,246 @@ def get_facturacion_por_arena_e_inversion_digital(query):
             return result
     except Exception as e:
         logger.error(f"Error Facturación por Arena: {e}")
+        return []
+    
+def get_desconfiados_con_inversion_alta(query):
+    """Clientes muy desconfiados pero con inversión alta en medios"""
+    try:
+        with engine.connect() as conn:
+            stmt = text("""
+                SELECT 
+                    d.nombre_canonico,
+                    p.que_tan_desconfiada_es_la_empresa_cuanto_cuesta_ve as nivel_confianza,
+                    SUM(f.facturacion)::float as facturacion_total,
+                    p.inversion_en_tv_abierta_2024_en_miles_usd::float as inv_tv,
+                    p.inversion_en_cable_2024_en_miles_usd::float as inv_cable,
+                    p.inversion_en_radio_2024_en_miles_usd::float as inv_radio,
+                    p.inversion_en_pdv_2024_en_miles_usd::float as inv_pdv,
+                    (p.inversion_en_tv_abierta_2024_en_miles_usd::float + 
+                     p.inversion_en_cable_2024_en_miles_usd::float +
+                     p.inversion_en_radio_2024_en_miles_usd::float +
+                     p.inversion_en_pdv_2024_en_miles_usd::float) as inversion_total,
+                    p.competitividad
+                FROM dim_anunciante d
+                LEFT JOIN dim_anunciante_perfil p ON d.anunciante_id = p.anunciante_id
+                LEFT JOIN fact_facturacion f ON d.anunciante_id = f.anunciante_id AND f.facturacion > 0
+                WHERE p.que_tan_desconfiada_es_la_empresa_cuanto_cuesta_ve ILIKE '%Muy desconfiada%'
+                  AND ((p.inversion_en_tv_abierta_2024_en_miles_usd::float + 
+                        p.inversion_en_cable_2024_en_miles_usd::float +
+                        p.inversion_en_radio_2024_en_miles_usd::float +
+                        p.inversion_en_pdv_2024_en_miles_usd::float) > 100)
+                GROUP BY d.anunciante_id, d.nombre_canonico, p.id,
+                         p.que_tan_desconfiada_es_la_empresa_cuanto_cuesta_ve,
+                         p.inversion_en_tv_abierta_2024_en_miles_usd,
+                         p.inversion_en_cable_2024_en_miles_usd,
+                         p.inversion_en_radio_2024_en_miles_usd,
+                         p.inversion_en_pdv_2024_en_miles_usd,
+                         p.competitividad
+                ORDER BY inversion_total DESC
+            """)
+            rows = conn.execute(stmt).fetchall()
+            
+            result = []
+            for r in rows:
+                inv_total = (float(r[7]) if r[7] else 0)
+                result.append({
+                    "cliente": r[0],
+                    "nivel_confianza": r[1],
+                    "facturacion_total": float(r[2]) if r[2] else 0,
+                    "inversion_tv": float(r[3]) if r[3] else 0,
+                    "inversion_cable": float(r[4]) if r[4] else 0,
+                    "inversion_radio": float(r[5]) if r[5] else 0,
+                    "inversion_pdv": float(r[6]) if r[6] else 0,
+                    "inversion_total": inv_total,
+                    "competitividad": r[8]
+                })
+            return result
+    except Exception as e:
+        logger.error(f"Error Desconfiados con Inversión: {e}")
+        return []
+
+
+def get_analisis_cliente_especifico(query):
+    """Análisis completo de un cliente específico: ON vs OFF, facturación por arena"""
+    query_limpio = query.lower()
+    palabras = query_limpio.split()
+    cliente = " ".join([p for p in palabras if p.isupper()])
+    
+    if not cliente:
+        # Buscar nombres comunes
+        if "superseis" in query_limpio:
+            cliente = "SUPERSEIS"
+        elif "pechugon" in query_limpio or "la blanca" in query_limpio:
+            cliente = "PECHUGON"
+        else:
+            return []
+    
+    try:
+        with engine.connect() as conn:
+            # Facturación por arena
+            stmt = text("""
+                SELECT 
+                    d.nombre_canonico,
+                    f.arena,
+                    f.subarenas,
+                    SUM(f.facturacion)::float as facturacion_arena,
+                    COUNT(DISTINCT f.anio || '-' || f.mes) as meses_activo,
+                    p.cluster,
+                    p.competitividad,
+                    p.la_empresa_invierte_en_digital
+                FROM dim_anunciante d
+                LEFT JOIN dim_anunciante_perfil p ON d.anunciante_id = p.anunciante_id
+                LEFT JOIN fact_facturacion f ON d.anunciante_id = f.anunciante_id AND f.facturacion > 0
+                WHERE UPPER(d.nombre_canonico) LIKE UPPER(:cliente)
+                GROUP BY d.anunciante_id, d.nombre_canonico, f.arena, f.subarenas, 
+                         p.id, p.cluster, p.competitividad, p.la_empresa_invierte_en_digital
+                ORDER BY facturacion_arena DESC
+            """)
+            rows = conn.execute(stmt, {"cliente": f"%{cliente}%"}).fetchall()
+            
+            result = []
+            total_facturacion = 0
+            on_facturacion = 0
+            
+            for r in rows:
+                facturacion = float(r[3]) if r[3] else 0
+                total_facturacion += facturacion
+                
+                is_on = "ON" in (r[2] or "").upper() or "DIGITAL" in (r[1] or "").upper()
+                if is_on:
+                    on_facturacion += facturacion
+                
+                result.append({
+                    "cliente": r[0],
+                    "arena": r[1],
+                    "subarena": r[2],
+                    "facturacion": facturacion,
+                    "meses_activo": r[4],
+                    "cluster": r[5],
+                    "competitividad": r[6],
+                    "invierte_digital": r[7],
+                    "es_on": is_on
+                })
+            
+            # Agregar resumen
+            if result:
+                result.append({
+                    "resumen": True,
+                    "total_facturacion": total_facturacion,
+                    "on_facturacion": on_facturacion,
+                    "off_facturacion": total_facturacion - on_facturacion,
+                    "porcentaje_on": (on_facturacion / total_facturacion * 100) if total_facturacion > 0 else 0
+                })
+            
+            return result
+    except Exception as e:
+        logger.error(f"Error Análisis Cliente Específico: {e}")
+        return []
+
+
+def get_clientes_por_atributo_adlens_arena(query):
+    """Clientes con atributo AdLens específico (Valiente, Innovadora, etc) en una arena"""
+    query_limpio = query.lower()
+    
+    # Detectar cliente específico primero
+    cliente_buscar = None
+    if "puma" in query_limpio:
+        cliente_buscar = "PUMA"
+    
+    # Detectar atributo
+    atributo = None
+    if "valiente" in query_limpio or "arriesgada" in query_limpio:
+        atributo = "Innovadora y valiente"
+    elif "conservadora" in query_limpio:
+        atributo = "Muy conservadora"
+    elif "discreta" in query_limpio:
+        atributo = "Discreta"
+    
+    # Detectar arena - más flexible
+    arenas_buscar = []
+    if "creatividad" in query_limpio:
+        arenas_buscar = ["CREACION DE CONTENIDO", "CREATIVIDAD"]
+    elif "contenido" in query_limpio or "on" in query_limpio or "off" in query_limpio:
+        arenas_buscar = ["DISTRIBUCION DE CONTENIDO", "CREACION DE CONTENIDO"]
+    elif "creacion" in query_limpio:
+        arenas_buscar = ["CREACION DE CONTENIDO"]
+    
+    if not (atributo or cliente_buscar) or not arenas_buscar:
+        return []
+    
+    try:
+        with engine.connect() as conn:
+            # Si busca cliente específico
+            if cliente_buscar:
+                stmt = text("""
+                    SELECT 
+                        d.nombre_canonico,
+                        p.con_respecto_al_marketing_y_la_publicidad_es_una_e as atributo,
+                        f.arena,
+                        f.subarenas,
+                        SUM(f.facturacion)::float as facturacion_total,
+                        AVG(f.facturacion)::float as promedio_mensual,
+                        p.inversion_en_tv_abierta_2024_en_miles_usd::float as inv_tv,
+                        p.la_marca_empresa_se_destaca_por_innovar_en_publici as innova_score,
+                        p.competitividad
+                    FROM dim_anunciante d
+                    LEFT JOIN dim_anunciante_perfil p ON d.anunciante_id = p.anunciante_id
+                    LEFT JOIN fact_facturacion f ON d.anunciante_id = f.anunciante_id AND f.facturacion > 0
+                    WHERE UPPER(d.nombre_canonico) LIKE UPPER(:cliente)
+                      AND UPPER(f.arena) IN ('CREACION DE CONTENIDO', 'DISTRIBUCION DE CONTENIDO', 'CREATIVIDAD')
+                    GROUP BY d.anunciante_id, d.nombre_canonico, p.id,
+                             p.con_respecto_al_marketing_y_la_publicidad_es_una_e,
+                             f.arena, f.subarenas,
+                             p.inversion_en_tv_abierta_2024_en_miles_usd,
+                             p.la_marca_empresa_se_destaca_por_innovar_en_publici,
+                             p.competitividad
+                    ORDER BY f.arena, facturacion_total DESC
+                """)
+                rows = conn.execute(stmt, {"cliente": f"%{cliente_buscar}%"}).fetchall()
+            else:
+                # Si busca por atributo
+                stmt = text("""
+                    SELECT 
+                        d.nombre_canonico,
+                        p.con_respecto_al_marketing_y_la_publicidad_es_una_e as atributo,
+                        f.arena,
+                        f.subarenas,
+                        SUM(f.facturacion)::float as facturacion_total,
+                        AVG(f.facturacion)::float as promedio_mensual,
+                        p.inversion_en_tv_abierta_2024_en_miles_usd::float as inv_tv,
+                        p.la_marca_empresa_se_destaca_por_innovar_en_publici as innova_score,
+                        p.competitividad
+                    FROM dim_anunciante d
+                    LEFT JOIN dim_anunciante_perfil p ON d.anunciante_id = p.anunciante_id
+                    LEFT JOIN fact_facturacion f ON d.anunciante_id = f.anunciante_id AND f.facturacion > 0
+                    WHERE p.con_respecto_al_marketing_y_la_publicidad_es_una_e ILIKE :atributo
+                      AND UPPER(f.arena) IN ('CREACION DE CONTENIDO', 'DISTRIBUCION DE CONTENIDO', 'CREATIVIDAD')
+                    GROUP BY d.anunciante_id, d.nombre_canonico, p.id,
+                             p.con_respecto_al_marketing_y_la_publicidad_es_una_e,
+                             f.arena, f.subarenas,
+                             p.inversion_en_tv_abierta_2024_en_miles_usd,
+                             p.la_marca_empresa_se_destaca_por_innovar_en_publici,
+                             p.competitividad
+                    ORDER BY f.arena, facturacion_total DESC
+                """)
+                rows = conn.execute(stmt, {"atributo": f"%{atributo}%"}).fetchall()
+            
+            result = []
+            for r in rows:
+                result.append({
+                    "cliente": r[0],
+                    "atributo": r[1],
+                    "arena": r[2],
+                    "subarena": r[3],
+                    "facturacion_total": float(r[4]) if r[4] else 0,
+                    "promedio_mensual": float(r[5]) if r[5] else 0,
+                    "inversion_tv": float(r[6]) if r[6] else 0,
+                    "innova_score": r[7],
+                    "competitividad": r[8]
+                })
+            return result
+    except Exception as e:
+        logger.error(f"Error Atributo AdLens + Arena: {e}")
         return []
     
 @app.route('/api/health', methods=['GET'])
