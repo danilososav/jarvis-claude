@@ -61,26 +61,37 @@ def query():
     try:
         query_lower = user_query.lower()
         
-        if any(w in query_lower for w in ["top", "ranking", "principal", "importante", "mayor", "más"]):
+        # Detectar múltiples palabras clave = análisis completo
+        palabra_clave_count = sum([
+            "cuanto" in query_lower or "cuánto" in query_lower,
+            "facturo" in query_lower or "facturación" in query_lower,
+            "inversion" in query_lower or "inversión" in query_lower,
+            "cluster" in query_lower,
+            "2026" in query_lower or "proyección" in query_lower,
+            "digital" in query_lower,
+            "tv" in query_lower
+        ])
+        
+        if palabra_clave_count >= 2:
+            query_type = "analisis_completo"
+            rows = get_analisis_completo(user_query)
+        elif "top" in query_lower or "ranking" in query_lower or "principal" in query_lower:
             query_type = "ranking"
             rows = get_top_clientes_enriched(user_query)
-        elif any(w in query_lower for w in ["cuánto", "factur", "ganó", "vendió", "hizo"]):
+        elif "cuánto" in query_lower or "factur" in query_lower:
             query_type = "facturacion"
             rows = get_facturacion_enriched(user_query)
         elif "vs" in query_lower or "versus" in query_lower:
             query_type = "comparacion"
             rows = get_comparacion_enriched(user_query)
-        elif any(w in query_lower for w in ["perfil", "quién es", "como es", "empresa"]):
-            query_type = "perfil"
-            rows = get_perfil_enriched(user_query)
+        elif "tendencia" in query_lower or "crecimiento" in query_lower:
+            query_type = "tendencia"
+            rows = get_tendencia_enriched(user_query)
         elif any(w in query_lower for w in ["perfil", "quién es", "como es", "empresa", "tipo", "caracteristic"]):
             query_type = "perfil_completo"
             rows = get_datos_cruzados_enriched(user_query)
-        elif any(w in query_lower for w in ["tendencia", "crecimiento", "variación", "cambio"]):
-            query_type = "tendencia"
-            rows = get_tendencia_enriched(user_query)
         else:
-            return jsonify({"success": False, "response": "Consulta no reconocida. Prueba: 'Top 5 clientes', 'Cuánto facturó CERVEPAR?', 'CERVEPAR vs TELEFONICA'"}), 200
+            return jsonify({"success": False, "response": "Consulta no reconocida. Prueba: 'Top 5 clientes', 'Cuánto facturó CERVEPAR?', 'CERVEPAR vs UNILEVER'"}), 200
         
         response_text = claude.enhance_response(user_query, rows, query_type)
         if not response_text:
@@ -91,7 +102,7 @@ def query():
     except Exception as e:
         logger.error(f"Error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
-
+    
 def get_top_clientes_enriched(query, limit=5):
     try:
         with engine.connect() as conn:
@@ -320,7 +331,94 @@ def get_datos_cruzados_enriched(query):
     except Exception as e:
         logger.error(f"Error Datos Cruzados: {e}")
         return []
-
+    
+def get_analisis_completo(query):
+    query_limpio = query.replace('?', '').replace('!', '').replace(',', '')
+    palabras = query_limpio.split()
+    # Buscar palabras en mayúsculas O que sea "cervepar"
+    cliente = ""
+    for p in palabras:
+        if p.isupper() and len(p) > 2:
+            cliente = p
+            break
+    
+    # Si no encuentra mayúscula, busca "cervepar" específicamente
+    if not cliente:
+        if "cervepar" in query_limpio:
+            cliente = "CERVEPAR"
+        else:
+            palabras_caps = [p.upper() for p in palabras if len(p) > 2 and not p.isdigit()]
+            if palabras_caps:
+                cliente = palabras_caps[0]
+    
+    if not cliente:
+        return []
+    
+    try:
+        with engine.connect() as conn:
+            stmt = text("""
+                SELECT 
+                    d.nombre_canonico,
+                    SUM(f.facturacion)::float as facturacion_total,
+                    AVG(f.facturacion)::float as promedio_mensual,
+                    p.cluster,
+                    p.inversion_en_tv_abierta_2024_en_miles_usd,
+                    p.inversion_en_cable_2024_en_miles_usd,
+                    p.inversion_en_radio_2024_en_miles_usd,
+                    p.inversion_en_pdv_2024_en_miles_usd,
+                    p.en_que_medios_invierte_la_empresa_principalmente,
+                    p.la_empresa_invierte_en_marketing_digital,
+                    p.puntaje_total,
+                    p.competitividad,
+                    p.cultura,
+                    p.estructura,
+                    p.ejecucion,
+                    p.inversion,
+                    MAX(f.anio) as ultimo_año
+                FROM dim_anunciante d
+                LEFT JOIN dim_anunciante_perfil p ON d.anunciante_id = p.anunciante_id
+                LEFT JOIN fact_facturacion f ON d.anunciante_id = f.anunciante_id AND f.facturacion > 0
+                WHERE UPPER(d.nombre_canonico) LIKE UPPER(:cliente)
+                GROUP BY d.anunciante_id, d.nombre_canonico, p.id, p.cluster, 
+                         p.inversion_en_tv_abierta_2024_en_miles_usd, p.inversion_en_cable_2024_en_miles_usd,
+                         p.inversion_en_radio_2024_en_miles_usd, p.inversion_en_pdv_2024_en_miles_usd,
+                         p.en_que_medios_invierte_la_empresa_principalmente, p.la_empresa_invierte_en_marketing_digital,
+                         p.puntaje_total, p.competitividad, p.cultura, p.estructura, p.ejecucion, p.inversion
+            """)
+            rows = conn.execute(stmt, {"cliente": f"%{cliente}%"}).fetchall()
+            
+            result = []
+            for r in rows:
+                facturacion_2025 = float(r[1]) if r[1] else 0
+                crecimiento_estimado = 1.15
+                proyeccion_2026 = facturacion_2025 * crecimiento_estimado
+                
+                result.append({
+                    "cliente": r[0],
+                    "facturacion_2025": facturacion_2025,
+                    "promedio_mensual": float(r[2]) if r[2] else 0,
+                    "cluster": r[3],
+                    "inversion_tv": r[4],
+                    "inversion_cable": r[5],
+                    "inversion_radio": r[6],
+                    "inversion_pdv": r[7],
+                    "medios": r[8],
+                    "invierte_digital": r[9],
+                    "puntaje": r[10],
+                    "competitividad": r[11],
+                    "cultura": r[12],
+                    "estructura": r[13],
+                    "ejecucion": r[14],
+                    "inversion_score": r[15],
+                    "ultimo_año": r[16],
+                    "proyeccion_2026": proyeccion_2026
+                })
+            
+            return result
+    except Exception as e:
+        logger.error(f"Error Análisis Completo: {e}")
+        return []
+    
 @app.route('/api/health', methods=['GET'])
 def health():
     return jsonify({"status": "ok"}), 200

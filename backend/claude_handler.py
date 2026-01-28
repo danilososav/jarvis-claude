@@ -26,6 +26,7 @@ class ClaudeHandler:
             "comparacion": "Diferencia %, ganador, estrategias diferenciadas",
             "perfil": "Características empresa, cluster, tamaño, potencial",
             "perfil_completo": "Integra facturación + perfil AdLens. Describe: rubro, tamaño, cluster, inversión en medios, digital, CRM, scores. Resume en 4-5 oraciones.",
+            "analisis_completo": "Integra facturación, inversión en medios (TV, cable, radio, PDV), cluster, scores de competitividad y proyección 2026. Resume en 5-7 oraciones con recomendaciones.",
         }
         
         hint = context_hints.get(query_type, "Responde clara y profesionalmente")
