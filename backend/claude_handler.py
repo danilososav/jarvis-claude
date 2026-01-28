@@ -27,6 +27,11 @@ class ClaudeHandler:
             "perfil": "Características empresa, cluster, tamaño, potencial",
             "perfil_completo": "Integra facturación + perfil AdLens. Describe: rubro, tamaño, cluster, inversión en medios, digital, CRM, scores. Resume en 4-5 oraciones.",
             "analisis_completo": "Integra facturación, inversión en medios (TV, cable, radio, PDV), cluster, scores de competitividad y proyección 2026. Resume en 5-7 oraciones con recomendaciones.",
+            "clientes_cluster": "Lista clientes del cluster con facturación total, inversión TV y scores. Ordena por facturación ascendente para identificar potencial. 4-5 oraciones.",
+            "decision_marketing": "Compara facturación según tipo de decisión. Resume diferencias entre Dpto autónomo vs Dueño. 4-5 oraciones con conclusión.",
+            "nivel_confianza": "Agrupa clientes por desconfianza. Identifica si desconfiados facturan menos. Resume tendencia. 3-4 oraciones.",
+            "inversion_vs_facturacion": "Calcula ratio facturación/inversión. Analiza ROI. Resume en 4-5 oraciones con recomendaciones.",
+            "arena_digital": "Facturación en Arena Distribución de Contenido - ON de empresas que invierten en digital. Lista top 5 con facturación total, promedio mensual y años activo. Resume tendencia. 4-5 oraciones.",
         }
         
         hint = context_hints.get(query_type, "Responde clara y profesionalmente")
