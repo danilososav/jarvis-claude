@@ -8,6 +8,7 @@ import './Charts.css';
 import { TrainerMode } from './TrainerMode';
 import { DynamicChart } from './DynamicChart';
 import { UploadExcel } from './UploadExcel';
+import { ExportButtons } from './ExportButtons';
 
 const API_URL = 'http://127.0.0.1:5000/api';
 
@@ -194,6 +195,9 @@ useEffect(() => {
                         {m.content}
                         {m.type === 'bot' && <TrainerMode message={m} index={i} userQuery={messages[i-1]?.content || ''} />}
                       </div>
+                      {m.type === 'bot' && (
+                        <ExportButtons message={m} chartConfig={m.chart_config} chartData={m.rows} />
+                      )}
                     </div>
                     {m.chart_config && m.rows && <DynamicChart data={m.rows} config={m.chart_config} />}
                     {m.query_type === 'ranking' && m.rows && !m.chart_config && <TopClientesChart data={m.rows} />}

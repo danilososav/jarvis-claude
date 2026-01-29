@@ -91,11 +91,15 @@ export function UploadExcel() {
 
             <div className="upload-content">
               <div className="upload-info">
-                <p>📌 Columnas requeridas:</p>
+                <p>📌 Requisitos:</p>
                 <ul>
-                  <li><code>anunciante_id</code> (número)</li>
-                  <li><code>facturacion</code> (número)</li>
+                  <li>✅ Columna obligatoria: <code>id</code> (número único)</li>
+                  <li>✅ Nombre de tabla: será el nombre del archivo</li>
+                  <li>✅ Formato: <code>.xlsx</code> únicamente</li>
+                  <li>ℹ️ Las demás columnas se crearán automáticamente</li>
                 </ul>
+                <div className="upload-divider"></div>
+                <p className="upload-note">💡 Ejemplo: "proveedores.xlsx" → tabla "proveedores"</p>
               </div>
 
               <div className="file-input-wrapper">

@@ -16,11 +16,28 @@ from fuzzywuzzy import fuzz
 import pandas as pd
 import io
 import json
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage
+from reportlab.lib.units import inch
+from io import BytesIO
+import base64
+from datetime import datetime
+import plotly.graph_objects as go
+
+
 
 # SQLAlchemy
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy import text
+
+import base64
+from io import BytesIO
+import plotly.graph_objects as go
+        
+
 
 load_dotenv()
 
@@ -499,23 +516,21 @@ def query(user_id):
             # Si no encontró tabla dinámica, continuar con otras detecciones
             if query_type == "generico":
                 # DETECCIÓN DE GRÁFICOS
-                if any(w in query_lower for w in ["gráfico", "grafico", "chart", "mostrar", "muestra"]):
+                # DETECCIÓN DE GRÁFICOS
+                if any(w in query_lower for w in ["gráfico", "grafico", "chart", "mostrar", "muestra", "barras", "pie", "línea", "linea"]):
+                    query_type = "chart"
+                    
                     if "barra" in query_lower or "bar" in query_lower:
                         chart_config = {"type": "bar"}
-                        query_type = "chart"
                     elif "pie" in query_lower or "torta" in query_lower or "circular" in query_lower:
                         chart_config = {"type": "pie"}
-                        query_type = "chart"
                     elif "línea" in query_lower or "linea" in query_lower or "line" in query_lower:
                         chart_config = {"type": "line"}
-                        query_type = "chart"
+                    else:
+                        chart_config = {"type": "bar"}  # Default a bar
                     
-                    if chart_config:
-                        if "top" in query_lower or "ranking" in query_lower or "cliente" in query_lower:
-                            rows = get_top_clientes_enriched(user_query)
-                            logger.info(f"🔍 Detectado: gráfico {chart_config['type']} - rows: {len(rows)}")
-                        else:
-                            rows = get_top_clientes_enriched(user_query)
+                    rows = get_top_clientes_enriched(user_query)
+                    logger.info(f"🔍 Detectado: gráfico {chart_config['type']} - rows: {len(rows)}")
                 
                 # DETECCIÓN DE RANKING
                 elif any(w in query_lower for w in ["top", "ranking", "principal", "importante", "mayor", "más", "clientes"]):
@@ -772,6 +787,247 @@ def upload_excel(user_id):
         logger.error(f"Error uploadando Excel: {e}")
         if session:
             session.close()
+        return jsonify({'error': str(e)}), 500
+    
+
+@app.route('/api/export/chart', methods=['POST'])
+@token_required
+def export_chart(user_id):
+    """Exportar gráfico como PNG"""
+    try:
+        data = request.json
+        chart_type = data.get('chart_type')
+        chart_data = data.get('chart_data')
+        
+        if not chart_type or not chart_data:
+            return jsonify({'error': 'Datos incompletos'}), 400
+        
+        
+        # Crear gráfico con Plotly
+        if chart_type == 'bar':
+            labels = [row.get('cliente', row.get('name', '')) for row in chart_data]
+            values = [row.get('facturacion', 0) for row in chart_data]
+            
+            fig = go.Figure(data=[go.Bar(x=labels, y=values, marker_color='#58a6ff')])
+            fig.update_layout(
+                title='Gráfico de Barras',
+                xaxis_title='Clientes',
+                yaxis_title='Facturación',
+                template='plotly_dark',
+                height=500
+            )
+        
+        elif chart_type == 'pie':
+            labels = [row.get('cliente', row.get('name', '')) for row in chart_data]
+            values = [row.get('market_share', 0) for row in chart_data]
+            
+            fig = go.Figure(data=[go.Pie(labels=labels, values=values)])
+            fig.update_layout(
+                title='Gráfico Circular',
+                template='plotly_dark',
+                height=500
+            )
+        
+        elif chart_type == 'line':
+            labels = [row.get('cliente', row.get('name', '')) for row in chart_data]
+            values = [row.get('facturacion', 0) for row in chart_data]
+            
+            fig = go.Figure(data=[go.Scatter(x=labels, y=values, mode='lines+markers', marker_color='#58a6ff')])
+            fig.update_layout(
+                title='Gráfico de Línea',
+                xaxis_title='Clientes',
+                yaxis_title='Facturación',
+                template='plotly_dark',
+                height=500
+            )
+        
+        # Convertir a PNG
+        img_bytes = fig.to_image(format="png")
+        img_base64 = base64.b64encode(img_bytes).decode()
+        
+        return jsonify({
+            'success': True,
+            'image': img_base64,
+            'filename': f'grafico_{chart_type}.png'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error exportando gráfico: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/export/pdf', methods=['POST'])
+@token_required
+def export_pdf(user_id):
+    """Exportar respuesta + gráfico como PDF"""
+    try:
+        data = request.json
+        response = data.get('response', '')
+        chart_type = data.get('chart_type')
+        chart_data = data.get('chart_data')
+        
+        # Crear PDF en memoria
+        pdf_buffer = BytesIO()
+        doc = SimpleDocTemplate(pdf_buffer, pagesize=letter)
+        elements = []
+        
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=18,
+            textColor='#58a6ff',
+            spaceAfter=12
+        )
+        
+        # Título
+        elements.append(Paragraph('JARVIS - Reporte', title_style))
+        elements.append(Spacer(1, 0.3*inch))
+        
+        # Fecha
+        fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
+        elements.append(Paragraph(f'<b>Fecha:</b> {fecha}', styles['Normal']))
+        elements.append(Spacer(1, 0.4*inch))
+        
+        # Respuesta
+        elements.append(Paragraph(response, styles['Normal']))
+        elements.append(Spacer(1, 0.3*inch))
+        
+        # Generar gráfico si existe
+        if chart_type and chart_data:
+            try:
+                # Crear gráfico con Plotly
+                if chart_type == 'bar':
+                    labels = [row.get('cliente', row.get('name', '')) for row in chart_data]
+                    values = [row.get('facturacion', 0) for row in chart_data]
+                    
+                    fig = go.Figure(data=[go.Bar(x=labels, y=values, marker_color='#58a6ff')])
+                    fig.update_layout(
+                        title='Gráfico de Barras',
+                        xaxis_title='Clientes',
+                        yaxis_title='Facturación',
+                        template='plotly_dark',
+                        height=400,
+                        width=600
+                    )
+                
+                elif chart_type == 'pie':
+                    labels = [row.get('cliente', row.get('name', '')) for row in chart_data]
+                    values = [row.get('market_share', 0) for row in chart_data]
+                    
+                    fig = go.Figure(data=[go.Pie(labels=labels, values=values)])
+                    fig.update_layout(
+                        title='Gráfico Circular',
+                        template='plotly_dark',
+                        height=400,
+                        width=600
+                    )
+                
+                elif chart_type == 'line':
+                    labels = [row.get('cliente', row.get('name', '')) for row in chart_data]
+                    values = [row.get('facturacion', 0) for row in chart_data]
+                    
+                    fig = go.Figure(data=[go.Scatter(x=labels, y=values, mode='lines+markers', marker_color='#58a6ff')])
+                    fig.update_layout(
+                        title='Gráfico de Línea',
+                        xaxis_title='Clientes',
+                        yaxis_title='Facturación',
+                        template='plotly_dark',
+                        height=400,
+                        width=600
+                    )
+                
+                # Convertir a PNG
+                img_bytes = fig.to_image(format="png")
+                img_buffer = BytesIO(img_bytes)
+                
+                # Agregar imagen al PDF
+                elements.append(Spacer(1, 0.2*inch))
+                elements.append(RLImage(img_buffer, width=5.5*inch, height=3.3*inch))
+                
+            except Exception as e:
+                logger.error(f"Error generando gráfico en PDF: {e}")
+                elements.append(Paragraph(f'<i>Error al incluir gráfico: {str(e)}</i>', styles['Normal']))
+        
+        # Generar PDF
+        doc.build(elements)
+        pdf_buffer.seek(0)
+        pdf_base64 = base64.b64encode(pdf_buffer.read()).decode()
+        
+        return jsonify({
+            'success': True,
+            'pdf': pdf_base64,
+            'filename': f'reporte_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pdf'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error exportando PDF: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/export/excel', methods=['POST'])
+@token_required
+def export_excel(user_id):
+    """Exportar datos como Excel"""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from io import BytesIO
+        import base64
+        from datetime import datetime
+        
+        data = request.json
+        table_data = data.get('data', [])
+        filename = data.get('filename', 'datos')
+        
+        if not table_data:
+            return jsonify({'error': 'Sin datos para exportar'}), 400
+        
+        # Crear Excel
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Datos"
+        
+        # Headers
+        headers = list(table_data[0].keys()) if table_data else []
+        header_fill = PatternFill(start_color='58a6ff', end_color='58a6ff', fill_type='solid')
+        header_font = Font(color='FFFFFF', bold=True)
+        
+        for col_num, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_num)
+            cell.value = header
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center')
+        
+        # Datos
+        for row_num, row_data in enumerate(table_data, 2):
+            for col_num, header in enumerate(headers, 1):
+                cell = ws.cell(row=row_num, column=col_num)
+                cell.value = row_data.get(header, '')
+                cell.alignment = Alignment(horizontal='left')
+        
+        # Auto-ajustar ancho
+        for col in ws.columns:
+            max_length = 0
+            for cell in col:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 50)
+        
+        # Guardar en memoria
+        excel_buffer = BytesIO()
+        wb.save(excel_buffer)
+        excel_buffer.seek(0)
+        excel_base64 = base64.b64encode(excel_buffer.read()).decode()
+        
+        return jsonify({
+            'success': True,
+            'excel': excel_base64,
+            'filename': f'{filename}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error exportando Excel: {e}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
