@@ -1,0 +1,15 @@
+.dynamic-chart-container {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  margin-top: 16px;
+  animation: slideIn 0.3s ease;
+}
+
+.chart-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}

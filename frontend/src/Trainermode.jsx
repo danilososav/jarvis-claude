@@ -6,7 +6,7 @@ import './TrainerMode.css';
 
 const API_URL = 'http://127.0.0.1:5000/api';
 
-export function TrainerMode({ message, index }) {
+export function TrainerMode({ message, index, userQuery }) {
   const { user } = useContext(AuthContext);
   const [isOpen, setIsOpen] = useState(false);
   const [correctedText, setCorrectedText] = useState(message.content);
@@ -20,36 +20,37 @@ export function TrainerMode({ message, index }) {
   }
 
   const handleSubmit = async () => {
-    setLoading(true);
-    try {
-      const token = Cookies.get('jarvis_token');
-      const res = await axios.post(
-        `${API_URL}/trainer/feedback`,
-        {
-          conversation_id: index,
-          original_response: message.content,
-          corrected_response: correctedText,
-          feedback_type: feedbackType,
-          notes: notes
-        },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+  setLoading(true);
+  try {
+    const token = Cookies.get('jarvis_token');
+    const res = await axios.post(
+    `${API_URL}/trainer/feedback`,
+    {
+      conversation_id: index,
+      original_query: userQuery,  // Usar la prop
+      original_response: message.content,
+      corrected_response: correctedText,
+      feedback_type: feedbackType,
+      notes: notes
+    },
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
 
-      if (res.data.success) {
-        setSubmitted(true);
-        setTimeout(() => {
-          setIsOpen(false);
-          setSubmitted(false);
-          setCorrectedText(message.content);
-          setNotes('');
-        }, 2000);
-      }
-    } catch (e) {
-      console.error('Error submitting feedback:', e);
-    } finally {
-      setLoading(false);
+    if (res.data.success) {
+      setSubmitted(true);
+      setTimeout(() => {
+        setIsOpen(false);
+        setSubmitted(false);
+        setCorrectedText(message.content);
+        setNotes('');
+      }, 2000);
     }
-  };
+  } catch (e) {
+    console.error('Error submitting feedback:', e);
+  } finally {
+    setLoading(false);
+  }
+};
 
   return (
     <div className="trainer-mode">

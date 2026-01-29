@@ -1,5 +1,5 @@
 """
-JARVIS - Backend Flask con PostgreSQL + Autenticación
+JARVIS - Backend Flask con PostgreSQL + Autenticación + Fuzzy Matching + Tablas Dinámicas
 Sistema BI conversacional para agencia de medios (Paraguay)
 """
 
@@ -9,10 +9,13 @@ import os
 from dotenv import load_dotenv
 import logging
 from datetime import datetime, timedelta
-import json
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from functools import wraps
+from fuzzywuzzy import fuzz
+import pandas as pd
+import io
+import json
 
 # SQLAlchemy
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
@@ -74,10 +77,19 @@ class TrainerFeedback(Base):
     id = Column(Integer, primary_key=True)
     conversation_id = Column(Integer)
     user_id = Column(Integer)
+    original_query = Column(Text)
     original_response = Column(Text)
     corrected_response = Column(Text)
     feedback_type = Column(String(50))
     notes = Column(Text)
+    created_at = Column(DateTime, default=datetime.now)
+
+class DynamicTable(Base):
+    __tablename__ = 'dynamic_tables'
+    id = Column(Integer, primary_key=True)
+    table_name = Column(String(100), unique=True)
+    columns = Column(Text)
+    created_by = Column(Integer)
     created_at = Column(DateTime, default=datetime.now)
 
 # Create tables
@@ -88,9 +100,6 @@ except Exception as e:
     logger.error(f"Error creando tablas: {e}")
 
 Session = sessionmaker(bind=engine)
-
-
-
 
 # ==================== AUTHENTICATION ====================
 
@@ -129,12 +138,56 @@ def token_required(f):
         return f(user_id, *args, **kwargs)
     return decorated
 
+# ==================== FUZZY MATCHING ====================
+
+def find_similar_feedback(user_query):
+    """Busca feedback similar comparando QUERIES"""
+    try:
+        session = Session()
+        feedbacks = session.query(TrainerFeedback).all()
+        session.close()
+        
+        best_match = None
+        best_score = 0
+        threshold = 80
+        
+        for fb in feedbacks:
+            if fb.original_query:
+                score = fuzz.token_set_ratio(user_query.lower(), fb.original_query.lower())
+                if score > best_score:
+                    best_score = score
+                    best_match = fb
+        
+        if best_match and best_score >= threshold:
+            logger.info(f"✅ Feedback similar encontrado: score {best_score}")
+            return best_match
+        
+        logger.info(f"❌ No hay feedback similar (mejor score: {best_score})")
+        return None
+    except Exception as e:
+        logger.error(f"Error en fuzzy matching: {e}")
+        return None
+
 # ==================== QUERIES A LA BD ====================
 
 def mock_claude_response(query_type, rows, user_query):
     """Respuestas inteligentes sin usar API Claude"""
     
-    if query_type == "ranking":
+    if query_type == "corrected":
+        return "Respuesta corregida por entrenador"
+    
+    elif query_type == "dynamic_table":
+        if rows:
+            return f"Encontré {len(rows)} registros en esa tabla. Primeros registros: {str(rows[:2])}"
+        return "No hay datos en esa tabla."
+    
+    elif query_type == "chart":
+        if rows:
+            total = sum(r.get("facturacion", 0) for r in rows)
+            return f"Aquí te muestro un gráfico con los {len(rows)} clientes principales. Facturación total: {total:,.0f} Gs"
+        return "No hay datos disponibles para el gráfico."
+    
+    elif query_type == "ranking":
         if rows:
             total_facturacion = sum(r.get("facturacion", 0) for r in rows)
             parts = [f"{i+1}. {r['cliente']}: {r['facturacion']:,.0f} Gs ({r.get('market_share', 0):.2f}%)" 
@@ -149,7 +202,7 @@ def mock_claude_response(query_type, rows, user_query):
         return "No tengo datos de facturación para ese cliente."
     
     else:
-        return f"Query type: {query_type}. Registros encontrados: {len(rows)}."
+        return "Consulta procesada."
 
 def get_top_clientes_enriched(query):
     """Top 5 clientes por facturación"""
@@ -251,13 +304,11 @@ def register():
         
         session = Session()
         
-        # Verificar si existe
         existing = session.query(User).filter_by(username=username).first()
         if existing:
             session.close()
             return jsonify({'error': 'Usuario ya existe'}), 409
         
-        # Crear usuario
         user = User(
             username=username,
             password_hash=generate_password_hash(password),
@@ -369,10 +420,42 @@ def get_chat_history(user_id):
         logger.error(f"Error obteniendo historial: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/chat/history/<int:conv_id>', methods=['DELETE'])
+@token_required
+def delete_conversation(user_id, conv_id):
+    """Eliminar una conversación"""
+    session = None
+    try:
+        session = Session()
+        
+        conversation = session.query(Conversation).filter_by(
+            id=conv_id, 
+            user_id=user_id
+        ).first()
+        
+        if not conversation:
+            session.close()
+            return jsonify({'error': 'Conversación no encontrada'}), 404
+        
+        session.delete(conversation)
+        session.commit()
+        session.close()
+        
+        logger.info(f"✅ Conversación {conv_id} eliminada")
+        
+        return jsonify({'success': True}), 200
+        
+    except Exception as e:
+        logger.error(f"Error eliminando conversación: {e}")
+        if session:
+            session.rollback()
+            session.close()
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/query', methods=['POST'])
 @token_required
 def query(user_id):
-    """Procesar query con detección automática de tipo"""
+    """Procesar query con detección automática"""
     data = request.json
     user_query = data.get('query', '').strip()
     
@@ -383,27 +466,74 @@ def query(user_id):
         query_lower = user_query.lower()
         rows = []
         query_type = "generico"
+        chart_config = None
+        response_text = None
         
-        # DETECCIÓN INTELIGENTE (Mejorada)
-        if any(w in query_lower for w in ["top", "ranking", "principal", "importante", "mayor", "más", "clientes"]):
-            if any(w in query_lower for w in ["factur", "ingresos", "venta"]):
-                query_type = "ranking"
-                rows = get_top_clientes_enriched(user_query)
-                logger.info(f"🔍 Detectado: ranking - rows: {len(rows)}")
-            else:
-                query_type = "ranking"
-                rows = get_top_clientes_enriched(user_query)
-                logger.info(f"🔍 Detectado: ranking - rows: {len(rows)}")
-
-        elif any(w in query_lower for w in ["cuánto", "cuanto", "factur", "how much"]):
-            query_type = "facturacion"
-            rows = get_facturacion_enriched(user_query)
-            logger.info(f"🔍 Detectado: facturacion - rows: {len(rows)}")
+        # BUSCAR FEEDBACK SIMILAR PRIMERO
+        similar_feedback = find_similar_feedback(user_query)
+        if similar_feedback:
+            response_text = similar_feedback.corrected_response
+            query_type = "corrected"
+            logger.info(f"✅ Usando respuesta corregida por trainer")
         else:
-            return jsonify({"success": False, "response": "Consulta no reconocida. Prueba: 'Top 5 clientes', 'Cuánto facturó CERVEPAR?'"}), 200
-        
-        # Mock Claude (Sin API)
-        response_text = mock_claude_response(query_type, rows, user_query)
+            # DETECCIÓN DE TABLAS DINÁMICAS
+            dynamic_session = Session()
+            try:
+                dynamic_tables = dynamic_session.query(DynamicTable).all()
+                for dt in dynamic_tables:
+                    if dt.table_name in query_lower:
+                        query_type = "dynamic_table"
+                        try:
+                            with engine.connect() as conn:
+                                stmt = text(f"SELECT * FROM {dt.table_name} LIMIT 10")
+                                result = conn.execute(stmt).fetchall()
+                                rows = [dict(row._mapping) for row in result]
+                                logger.info(f"🔍 Tabla dinámica detectada: {dt.table_name}")
+                        except Exception as e:
+                            logger.error(f"Error queryando tabla dinámica: {e}")
+                            rows = []
+                        break
+            finally:
+                dynamic_session.close()
+            
+            # Si no encontró tabla dinámica, continuar con otras detecciones
+            if query_type == "generico":
+                # DETECCIÓN DE GRÁFICOS
+                if any(w in query_lower for w in ["gráfico", "grafico", "chart", "mostrar", "muestra"]):
+                    if "barra" in query_lower or "bar" in query_lower:
+                        chart_config = {"type": "bar"}
+                        query_type = "chart"
+                    elif "pie" in query_lower or "torta" in query_lower or "circular" in query_lower:
+                        chart_config = {"type": "pie"}
+                        query_type = "chart"
+                    elif "línea" in query_lower or "linea" in query_lower or "line" in query_lower:
+                        chart_config = {"type": "line"}
+                        query_type = "chart"
+                    
+                    if chart_config:
+                        if "top" in query_lower or "ranking" in query_lower or "cliente" in query_lower:
+                            rows = get_top_clientes_enriched(user_query)
+                            logger.info(f"🔍 Detectado: gráfico {chart_config['type']} - rows: {len(rows)}")
+                        else:
+                            rows = get_top_clientes_enriched(user_query)
+                
+                # DETECCIÓN DE RANKING
+                elif any(w in query_lower for w in ["top", "ranking", "principal", "importante", "mayor", "más", "clientes"]):
+                    query_type = "ranking"
+                    rows = get_top_clientes_enriched(user_query)
+                    logger.info(f"🔍 Detectado: ranking - rows: {len(rows)}")
+                
+                # DETECCIÓN DE FACTURACIÓN
+                elif any(w in query_lower for w in ["cuánto", "cuanto", "factur", "how much"]):
+                    query_type = "facturacion"
+                    rows = get_facturacion_enriched(user_query)
+                    logger.info(f"🔍 Detectado: facturacion - rows: {len(rows)}")
+                
+                else:
+                    return jsonify({"success": False, "response": "Consulta no reconocida. Prueba: 'Top 5 clientes', 'Gráfico de barras', 'Cuánto facturó CERVEPAR?'"}), 200
+            
+            # Generar respuesta si no es corregida
+            response_text = mock_claude_response(query_type, rows, user_query)
         
         # Guardar en BD
         session = Session()
@@ -427,6 +557,7 @@ def query(user_id):
             "success": True,
             "response": response_text,
             "query_type": query_type,
+            "chart_config": chart_config,
             "rows": rows,
             "conversation_id": conv_id
         }), 200
@@ -434,36 +565,9 @@ def query(user_id):
     except Exception as e:
         logger.error(f"Error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
-    
 
-@app.route('/api/chat/history/<int:conv_id>', methods=['DELETE'])
-@token_required
-def delete_conversation(user_id, conv_id):
-    """Eliminar una conversación"""
-    try:
-        session = Session()
-        
-        conversation = session.query(Conversation).filter_by(
-            id=conv_id, 
-            user_id=user_id
-        ).first()
-        
-        if not conversation:
-            session.close()
-            return jsonify({'error': 'Conversación no encontrada'}), 404
-        
-        session.delete(conversation)
-        session.commit()
-        session.close()
-        
-        logger.info(f"✅ Conversación {conv_id} eliminada")
-        
-        return jsonify({'success': True}), 200
-        
-    except Exception as e:
-        logger.error(f"Error eliminando conversación: {e}")
-        return jsonify({'error': str(e)}), 500
-    
+# ==================== TRAINER ENDPOINTS ====================
+
 @app.route('/api/trainer/feedback', methods=['POST'])
 @token_required
 def submit_trainer_feedback(user_id):
@@ -474,12 +578,14 @@ def submit_trainer_feedback(user_id):
         user = session.query(User).filter_by(id=user_id).first()
         
         if not user or user.role != 'trainer':
+            session.close()
             return jsonify({'error': 'Solo trainers pueden enviar feedback'}), 403
         
         data = request.json
         feedback = TrainerFeedback(
             conversation_id=data.get('conversation_id'),
             user_id=user_id,
+            original_query=data.get('original_query'),
             original_response=data.get('original_response'),
             corrected_response=data.get('corrected_response'),
             feedback_type=data.get('feedback_type', 'correction'),
@@ -488,6 +594,7 @@ def submit_trainer_feedback(user_id):
         session.add(feedback)
         session.commit()
         feedback_id = feedback.id
+        session.close()
         
         logger.info(f"✅ Trainer feedback guardado: {feedback_id}")
         
@@ -497,12 +604,9 @@ def submit_trainer_feedback(user_id):
         logger.error(f"Error en trainer feedback: {e}")
         if session:
             session.rollback()
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if session:
             session.close()
+        return jsonify({'error': str(e)}), 500
 
-            
 @app.route('/api/trainer/feedback', methods=['GET'])
 @token_required
 def get_trainer_feedback(user_id):
@@ -515,7 +619,7 @@ def get_trainer_feedback(user_id):
             session.close()
             return jsonify({'error': 'Solo trainers pueden ver feedback'}), 403
         
-            feedbacks = session.query(TrainerFeedback)\
+        feedbacks = session.query(TrainerFeedback)\
             .filter_by(user_id=user_id)\
             .order_by(TrainerFeedback.created_at.desc())\
             .limit(100)\
@@ -537,6 +641,139 @@ def get_trainer_feedback(user_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/trainer/upload', methods=['POST'])
+@token_required
+def upload_excel(user_id):
+    """Subir Excel dinámico - crea tabla automáticamente"""
+    session = None
+    try:
+        session = Session()
+        user = session.query(User).filter_by(id=user_id).first()
+        
+        if not user or user.role != 'trainer':
+            session.close()
+            return jsonify({'error': 'Solo trainers pueden subir archivos'}), 403
+        
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        if not file.filename.endswith('.xlsx'):
+            return jsonify({'error': 'Solo archivos .xlsx'}), 400
+        
+        # Obtener nombre de tabla del archivo
+        table_name = file.filename.replace('.xlsx', '').lower()
+        table_name = table_name.replace(' ', '_')
+        table_name = table_name.replace('-', '_')
+        
+        # Validar nombre válido
+        if not table_name.isidentifier():
+            return jsonify({'error': 'Nombre de archivo inválido'}), 400
+        
+        # Leer Excel
+        excel_file = io.BytesIO(file.read())
+        df = pd.read_excel(excel_file)
+        
+        # Validar que tenga columna 'id'
+        if 'id' not in df.columns:
+            return jsonify({'error': 'Excel debe tener columna "id"'}), 400
+        
+        # NUEVO: Forzar rollback de transacciones previas
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("ROLLBACK"))
+        except:
+            pass
+        
+        # Crear tabla en BD - SIN transacción explícita
+        try:
+            with engine.connect() as conn:
+                # Verificar si tabla ya existe
+                table_exists = False
+                try:
+                    result = conn.execute(text(f"SELECT 1 FROM information_schema.tables WHERE table_name='{table_name}'"))
+                    table_exists = result.fetchone() is not None
+                except:
+                    pass
+                
+                if not table_exists:
+                    # Crear tabla
+                    columns_sql = "id SERIAL PRIMARY KEY"
+                    
+                    for col in df.columns:
+                        if col != 'id':
+                            if df[col].dtype in ['int64', 'int32']:
+                                col_type = 'INTEGER'
+                            elif df[col].dtype in ['float64', 'float32']:
+                                col_type = 'NUMERIC'
+                            else:
+                                col_type = 'VARCHAR(255)'
+                            
+                            columns_sql += f", {col} {col_type}"
+                    
+                    create_sql = f"CREATE TABLE {table_name} ({columns_sql})"
+                    conn.execute(text(create_sql))
+                    conn.commit()
+                    logger.info(f"✅ Tabla creada: {table_name}")
+                
+                # Insertar datos
+                rows_inserted = 0
+                errors = []
+                
+                for idx, row in df.iterrows():
+                    try:
+                        cols = ", ".join([col for col in df.columns if col != 'id'])
+                        placeholders = ", ".join([f"'{str(row[col]).replace(chr(39), chr(39)*2)}'" 
+                                                 for col in df.columns if col != 'id'])
+                        
+                        insert_sql = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders})"
+                        conn.execute(text(insert_sql))
+                        rows_inserted += 1
+                    except Exception as e:
+                        errors.append(f"Row {idx}: {str(e)}")
+                
+                conn.commit()
+        
+        except Exception as e:
+            logger.error(f"Error en creación de tabla: {e}")
+            raise
+        
+        # Guardar metadata
+        try:
+            meta_session = Session()
+            existing_table = meta_session.query(DynamicTable).filter_by(table_name=table_name).first()
+            if not existing_table:
+                dynamic_table = DynamicTable(
+                    table_name=table_name,
+                    columns=json.dumps(list(df.columns)),
+                    created_by=user_id
+                )
+                meta_session.add(dynamic_table)
+                meta_session.commit()
+            meta_session.close()
+        except Exception as meta_err:
+            logger.error(f"Error guardando metadata: {meta_err}")
+        
+        session.close()
+        logger.info(f"✅ Tabla dinámica: {table_name} - {rows_inserted} filas")
+        
+        return jsonify({
+            'success': True,
+            'table_name': table_name,
+            'rows_inserted': rows_inserted,
+            'columns': list(df.columns),
+            'errors': errors
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error uploadando Excel: {e}")
+        if session:
+            session.close()
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
-    logger.info("🚀 JARVIS Backend con Autenticación iniciando...")
+    logger.info("🚀 JARVIS Backend + Tablas Dinámicas iniciando...")
     app.run(host='0.0.0.0', port=5000, debug=True)

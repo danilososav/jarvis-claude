@@ -6,6 +6,8 @@ import './ChatApp.css';
 import { TopClientesChart, MarketShareChart, ClienteAnalysisChart } from './Charts';
 import './Charts.css';
 import { TrainerMode } from './TrainerMode';
+import { DynamicChart } from './DynamicChart';
+import { UploadExcel } from './UploadExcel';
 
 const API_URL = 'http://127.0.0.1:5000/api';
 
@@ -17,15 +19,7 @@ export default function ChatApp() {
   const [history, setHistory] = useState([]);
   const messagesEndRef = useRef(null);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  useEffect(() => {
-    loadHistory();
-  }, []);
-
-  const loadHistory = async () => {
+    const loadHistory = async () => {
     try {
       const token = Cookies.get('jarvis_token');
       const res = await axios.get(`${API_URL}/chat/history`, {
@@ -37,40 +31,57 @@ export default function ChatApp() {
     }
   };
 
+useEffect(() => {
+  messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+}, [messages]);
+
+useEffect(() => {
+  loadHistory();
+}, []);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  useEffect(() => {
+    loadHistory();
+  }, []);
+
   const sendQuery = async (e) => {
-    e.preventDefault();
-    if (!query.trim()) return;
+  e.preventDefault();
+  if (!query.trim()) return;
 
-    const msg = query;
-    setQuery('');
-    setMessages(p => [...p, { type: 'user', content: msg }]);
-    setLoading(true);
+  const msg = query;
+  setQuery('');
+  setMessages(p => [...p, { type: 'user', content: msg }]);
+  setLoading(true);
 
-    try {
-      const token = Cookies.get('jarvis_token');
-      const res = await axios.post(
-        `${API_URL}/query`,
-        { query: msg },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+  try {
+    const token = Cookies.get('jarvis_token');
+    const res = await axios.post(
+      `${API_URL}/query`,
+      { query: msg },
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
 
-      if (res.data.success) {
-          setMessages(p => [...p, { 
-            type: 'bot', 
-            content: res.data.response,
-            query_type: res.data.query_type,
-            rows: res.data.rows
-          }]);
-          loadHistory();
-      }  else {
-        setMessages(p => [...p, { type: 'error', content: `Error: ${res.data.error}` }]);
-      }
-    } catch (e) {
-      setMessages(p => [...p, { type: 'error', content: `Error: ${e.message}` }]);
-    } finally {
-      setLoading(false);
+    if (res.data.success) {
+      setMessages(p => [...p, { 
+        type: 'bot', 
+        content: res.data.response,
+        query_type: res.data.query_type,
+        chart_config: res.data.chart_config,
+        rows: res.data.rows
+      }]);
+      loadHistory();
+    } else {
+      setMessages(p => [...p, { type: 'error', content: `Error: ${res.data.error}` }]);
     }
-  };
+  } catch (e) {
+    setMessages(p => [...p, { type: 'error', content: `Error: ${e.message}` }]);
+  } finally {
+    setLoading(false);
+  }
+};
 
   const selectConv = (conv) => {
     setMessages([
@@ -117,6 +128,7 @@ export default function ChatApp() {
         <button className="new-chat-btn" onClick={handleNewChat}>
           + New Chat
         </button>
+        <UploadExcel />
 
         <div className="history-container">
           <div className="history-label">Conversations</div>
@@ -180,12 +192,13 @@ export default function ChatApp() {
                     <div className={`message ${m.type}`}>
                       <div className="message-bubble">
                         {m.content}
-                        {m.type === 'bot' && <TrainerMode message={m} index={i} />}
+                        {m.type === 'bot' && <TrainerMode message={m} index={i} userQuery={messages[i-1]?.content || ''} />}
                       </div>
                     </div>
-                    {m.query_type === 'ranking' && m.rows && <TopClientesChart data={m.rows} />}
-                    {m.query_type === 'ranking' && m.rows && <MarketShareChart data={m.rows} />}
-                    {m.query_type === 'facturacion' && m.rows && <ClienteAnalysisChart data={m.rows} />}
+                    {m.chart_config && m.rows && <DynamicChart data={m.rows} config={m.chart_config} />}
+                    {m.query_type === 'ranking' && m.rows && !m.chart_config && <TopClientesChart data={m.rows} />}
+                    {m.query_type === 'ranking' && m.rows && !m.chart_config && <MarketShareChart data={m.rows} />}
+                    {m.query_type === 'facturacion' && m.rows && !m.chart_config && <ClienteAnalysisChart data={m.rows} />}
                   </div>
                 ))}
               {loading && (
