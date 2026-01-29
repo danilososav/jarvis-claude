@@ -109,6 +109,16 @@ class DynamicTable(Base):
     created_by = Column(Integer)
     created_at = Column(DateTime, default=datetime.now)
 
+class AuditLog(Base):
+    __tablename__ = 'audit_logs'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer)
+    username = Column(String(50))
+    action = Column(String(100))
+    details = Column(Text)
+    ip_address = Column(String(45))
+    created_at = Column(DateTime, default=datetime.now)
+
 # Create tables
 try:
     Base.metadata.create_all(engine)
@@ -156,6 +166,23 @@ def token_required(f):
     return decorated
 
 # ==================== FUZZY MATCHING ====================
+
+def log_audit(user_id, username, action, details='', ip_address=''):
+    """Registra auditoría"""
+    try:
+        session = Session()
+        audit = AuditLog(
+            user_id=user_id,
+            username=username,
+            action=action,
+            details=details,
+            ip_address=ip_address
+        )
+        session.add(audit)
+        session.commit()
+        session.close()
+    except Exception as e:
+        logger.error(f"Error en auditoría: {e}")
 
 def find_similar_feedback(user_query):
     """Busca feedback similar comparando QUERIES"""
@@ -382,6 +409,7 @@ def login():
             'token': token
         }), 200
         
+        log_audit(user.id, user.username, 'LOGIN', ip_address=request.remote_addr)
     except Exception as e:
         logger.error(f"Error en login: {e}")
         return jsonify({'error': str(e)}), 500
@@ -473,9 +501,15 @@ def delete_conversation(user_id, conv_id):
 @token_required
 def query(user_id):
     """Procesar query con detección automática"""
+    session = Session()
+    user = session.query(User).filter_by(id=user_id).first()
+    username = user.username if user else 'unknown'
+    session.close()
+    
     data = request.json
     user_query = data.get('query', '').strip()
-    
+    log_audit(user_id, user.username, 'QUERY', details=user_query[:100], ip_address=request.remote_addr)
+
     if not user_query:
         return jsonify({"error": "Query vacío"}), 400
     
@@ -562,6 +596,7 @@ def query(user_id):
             session.add(conversation)
             session.commit()
             conv_id = conversation.id
+            log_audit(user_id, user.username, 'FEEDBACK', details=f"Feedback ID: {feedback_id}", ip_address=request.remote_addr)
         except Exception as db_err:
             logger.error(f"Error guardando en BD: {db_err}")
             conv_id = None
@@ -747,6 +782,7 @@ def upload_excel(user_id):
                         insert_sql = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders})"
                         conn.execute(text(insert_sql))
                         rows_inserted += 1
+                        log_audit(user_id, user.username, 'UPLOAD', details=f"Tabla: {table_name}, Filas: {rows_inserted}", ip_address=request.remote_addr)
                     except Exception as e:
                         errors.append(f"Row {idx}: {str(e)}")
                 
@@ -1028,6 +1064,40 @@ def export_excel(user_id):
         
     except Exception as e:
         logger.error(f"Error exportando Excel: {e}")
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/api/audit/logs', methods=['GET'])
+@token_required
+def get_audit_logs(user_id):
+    """Obtener logs de auditoría"""
+    try:
+        session = Session()
+        user = session.query(User).filter_by(id=user_id).first()
+        
+        if not user or user.role != 'trainer':
+            session.close()
+            return jsonify({'error': 'Solo trainers pueden ver auditoría'}), 403
+        
+        logs = session.query(AuditLog)\
+            .order_by(AuditLog.created_at.desc())\
+            .limit(500)\
+            .all()
+        
+        result = [{
+            "id": log.id,
+            "user_id": log.user_id,
+            "username": log.username,
+            "action": log.action,
+            "details": log.details,
+            "ip_address": log.ip_address,
+            "created_at": log.created_at.isoformat()
+        } for log in logs]
+        
+        session.close()
+        return jsonify({'success': True, 'logs': result}), 200
+        
+    except Exception as e:
+        logger.error(f"Error obteniendo logs: {e}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':

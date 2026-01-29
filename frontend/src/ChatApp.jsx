@@ -9,6 +9,7 @@ import { TrainerMode } from './TrainerMode';
 import { DynamicChart } from './DynamicChart';
 import { UploadExcel } from './UploadExcel';
 import { ExportButtons } from './ExportButtons';
+import { AuditLogs } from './AuditLogs';
 
 const API_URL = 'http://127.0.0.1:5000/api';
 
@@ -19,6 +20,7 @@ export default function ChatApp() {
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState([]);
   const messagesEndRef = useRef(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
     const loadHistory = async () => {
     try {
@@ -130,12 +132,26 @@ useEffect(() => {
           + New Chat
         </button>
         <UploadExcel />
-
+        <AuditLogs />
         <div className="history-container">
           <div className="history-label">Conversations</div>
+          
+          <input
+            type="text"
+            placeholder="🔍 Buscar..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="search-input"
+          />
+          
           <div className="history-list">
             {history.length ? (
-              history.map(c => (
+              history
+                .filter(c => 
+                  c.query.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                  c.response.toLowerCase().includes(searchQuery.toLowerCase())
+                )
+                .map(c => (
                 <div key={c.id} className="history-item">
                   <span onClick={() => selectConv(c)} className="history-text">
                     {c.query.substring(0, 40)}
