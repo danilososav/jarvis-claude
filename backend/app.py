@@ -647,7 +647,6 @@ def query(user_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ==================== TRAINER ENDPOINTS ====================
-
 @app.route('/api/trainer/feedback', methods=['POST'])
 @token_required
 def submit_trainer_feedback(user_id):
@@ -656,6 +655,7 @@ def submit_trainer_feedback(user_id):
     try:
         session = Session()
         user = session.query(User).filter_by(id=user_id).first()
+        username = user.username if user else 'unknown'
         
         if not user or user.role != 'trainer':
             session.close()
@@ -675,10 +675,10 @@ def submit_trainer_feedback(user_id):
         session.commit()
         feedback_id = feedback.id
         session.close()
-
-            # AUDIT (después de cerrar session)
-        log_audit(user_id, user.username, 'FEEDBACK', details=f"Feedback ID: {feedback_id}", ip_address=request.remote_addr)
-                    
+        
+        # Log después de cerrar sesión
+        log_audit(user_id, username, 'FEEDBACK', details=f"Feedback ID: {feedback_id}", ip_address=request.remote_addr)
+        
         logger.info(f"✅ Trainer feedback guardado: {feedback_id}")
         
         return jsonify({'success': True, 'feedback_id': feedback_id}), 201
