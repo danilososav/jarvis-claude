@@ -126,11 +126,10 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px;
-  margin-bottom: 4px;
+  padding: 6px;
   border-radius: 6px;
+  margin-bottom: 6px;
   transition: background 0.2s;
-  width: 100%;
 }
 
 .history-session:hover {
@@ -139,12 +138,11 @@
 
 .history-item {
   flex: 1;
-  min-width: 0;
-  padding: 8px 10px;
-  border: none;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
   background: transparent;
-  color: var(--text-secondary);
-  border-radius: 4px;
+  color: var(--text-primary);
+  border-radius: 6px;
   cursor: pointer;
   font-size: 12px;
   text-align: left;
@@ -152,35 +150,31 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   transition: all 0.2s;
+  min-width: 0;
 }
 
 .history-item:hover {
-  color: var(--text-primary);
-  background: rgba(88, 166, 255, 0.05);
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.1);
+  color: var(--accent);
 }
 
 .delete-btn {
   padding: 6px 8px;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
+  border: 1px solid #f85149;
+  background: rgba(248, 81, 73, 0.1);
+  color: #f85149;
   border-radius: 4px;
   cursor: pointer;
   font-size: 14px;
+  font-weight: bold;
   flex-shrink: 0;
   transition: all 0.2s;
-  opacity: 0;
-  visibility: hidden;
-}
-
-.history-session:hover .delete-btn {
-  opacity: 1;
-  visibility: visible;
-  color: #f85149;
 }
 
 .delete-btn:hover {
-  background: rgba(248, 81, 73, 0.1);
+  background: rgba(248, 81, 73, 0.2);
+  border-color: #f85149;
 }
 
 .history-empty {

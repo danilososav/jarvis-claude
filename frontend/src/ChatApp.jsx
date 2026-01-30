@@ -21,96 +21,110 @@ export default function ChatApp() {
   const [history, setHistory] = useState([]);
   const messagesEndRef = useRef(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [sessionId, setSessionId] = useState(null);
 
-    const loadHistory = async () => {
+  const loadHistory = async () => {
     try {
       const token = Cookies.get('jarvis_token');
       const res = await axios.get(`${API_URL}/chat/history`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      setHistory(res.data.conversations || []);
+      
+      const sessions = res.data.sessions || [];
+      
+      setHistory(sessions.map(s => ({
+        session_id: s.session_id,
+        messages: s.messages,
+        created_at: s.created_at
+      })));
     } catch (e) {
       console.error('Error loading history:', e);
     }
   };
-
-useEffect(() => {
-  messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-}, [messages]);
-
-useEffect(() => {
-  loadHistory();
-}, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   useEffect(() => {
+    if (!sessionId) {
+      setSessionId(`session_${user.user_id}_${Date.now()}`);
+    }
+  }, [user, sessionId]);
+
+  useEffect(() => {
     loadHistory();
   }, []);
 
   const sendQuery = async (e) => {
-  e.preventDefault();
-  if (!query.trim()) return;
+    e.preventDefault();
+    if (!query.trim()) return;
 
-  const msg = query;
-  setQuery('');
-  setMessages(p => [...p, { type: 'user', content: msg }]);
-  setLoading(true);
+    const msg = query;
+    setQuery('');
+    setMessages(p => [...p, { type: 'user', content: msg }]);
+    setLoading(true);
 
-  try {
-    const token = Cookies.get('jarvis_token');
-    const res = await axios.post(
-      `${API_URL}/query`,
-      { query: msg },
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
+    try {
+      const token = Cookies.get('jarvis_token');
+      
+      const res = await axios.post(
+        `${API_URL}/query`,
+        { query: msg, session_id: sessionId },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
 
-    if (res.data.success) {
-      setMessages(p => [...p, { 
-        type: 'bot', 
-        content: res.data.response,
-        query_type: res.data.query_type,
-        chart_config: res.data.chart_config,
-        rows: res.data.rows
-      }]);
-      loadHistory();
-    } else {
-      setMessages(p => [...p, { type: 'error', content: `Error: ${res.data.error}` }]);
+      if (res.data.success) {
+        setMessages(p => [...p, { 
+          type: 'bot', 
+          content: res.data.response,
+          query_type: res.data.query_type,
+          chart_config: res.data.chart_config,
+          rows: res.data.rows
+        }]);
+        loadHistory();
+      } else {
+        setMessages(p => [...p, { type: 'error', content: `Error: ${res.data.error}` }]);
+      }
+    } catch (e) {
+      setMessages(p => [...p, { type: 'error', content: `Error: ${e.message}` }]);
+    } finally {
+      setLoading(false);
     }
-  } catch (e) {
-    setMessages(p => [...p, { type: 'error', content: `Error: ${e.message}` }]);
-  } finally {
-    setLoading(false);
-  }
-};
+  };
 
-  const selectConv = (conv) => {
-    setMessages([
-      { type: 'user', content: conv.query },
-      { type: 'bot', content: conv.response }
-    ]);
+  const selectSession = (session) => {
+    setMessages(session.messages.flatMap((m) => [
+      { type: 'user', content: m.query },
+      { 
+        type: 'bot', 
+        content: m.response,
+        query_type: m.query_type,
+        chart_config: m.chart_config,
+        rows: m.rows
+      }
+    ]));
   };
 
   const deleteConv = async (id) => {
-  try {
-    const token = Cookies.get('jarvis_token');
-    const res = await axios.delete(`${API_URL}/chat/history/${id}`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    
-    if (res.data.success) {
-      setHistory(h => h.filter(x => x.id !== id));
-      console.log('✅ Chat eliminado:', id);
+    try {
+      const token = Cookies.get('jarvis_token');
+      const res = await axios.delete(`${API_URL}/chat/history/${id}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      
+      if (res.data.success) {
+        loadHistory();
+        console.log('✅ Chat eliminado:', id);
+      }
+    } catch (e) {
+      console.error('❌ Error deleting:', e.response?.data || e.message);
     }
-  } catch (e) {
-    console.error('❌ Error deleting:', e.response?.data || e.message);
-  }
-};
+  };
 
   const handleNewChat = () => {
     setMessages([]);
+    setSessionId(`session_${user.user_id}_${Date.now()}`);
   };
 
   const handleLogout = () => {
@@ -133,6 +147,7 @@ useEffect(() => {
         </button>
         <UploadExcel />
         <AuditLogs />
+        
         <div className="history-container">
           <div className="history-label">Conversations</div>
           
@@ -147,26 +162,32 @@ useEffect(() => {
           <div className="history-list">
             {history.length ? (
               history
-                .filter(c => 
-                  c.query.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                  c.response.toLowerCase().includes(searchQuery.toLowerCase())
+                .filter(session => 
+                  session.messages.some(m =>
+                    m.query.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                    m.response.toLowerCase().includes(searchQuery.toLowerCase())
+                  )
                 )
-                .map(c => (
-                <div key={c.id} className="history-item">
-                  <span onClick={() => selectConv(c)} className="history-text">
-                    {c.query.substring(0, 40)}
-                  </span>
-                  <button
-                    className="delete-btn"
-                    onClick={() => deleteConv(c.id)}
-                    title="Delete"
-                  >
-                    ×
-                  </button>
-                </div>
-              ))
+                .map(session => (
+                  <div key={session.session_id} className="history-session">
+                    <button
+                      className="history-item"
+                      onClick={() => selectSession(session)}
+                      title={session.messages[0]?.query}
+                    >
+                      {session.messages[0]?.query.substring(0, 35)}...
+                    </button>
+                    <button 
+                      className="delete-btn"
+                      onClick={() => deleteConv(session.messages[0].id)}
+                      title="Eliminar chat"
+                    >
+                      🗑️
+                    </button>
+                  </div>
+                ))
             ) : (
-              <div className="history-empty">No conversations yet</div>
+              <div className="history-empty">Sin conversaciones</div>
             )}
           </div>
         </div>
@@ -205,22 +226,22 @@ useEffect(() => {
           ) : (
             <div className="messages">
               {messages.map((m, i) => (
-                  <div key={i}>
-                    <div className={`message ${m.type}`}>
-                      <div className="message-bubble">
-                        {m.content}
-                        {m.type === 'bot' && <TrainerMode message={m} index={i} userQuery={messages[i-1]?.content || ''} />}
-                      </div>
-                      {m.type === 'bot' && (
-                        <ExportButtons message={m} chartConfig={m.chart_config} chartData={m.rows} />
-                      )}
+                <div key={i}>
+                  <div className={`message ${m.type}`}>
+                    <div className="message-bubble">
+                      {m.content}
+                      {m.type === 'bot' && <TrainerMode message={m} index={i} userQuery={messages[i-1]?.content || ''} />}
                     </div>
-                    {m.chart_config && m.rows && <DynamicChart data={m.rows} config={m.chart_config} />}
-                    {m.query_type === 'ranking' && m.rows && !m.chart_config && <TopClientesChart data={m.rows} />}
-                    {m.query_type === 'ranking' && m.rows && !m.chart_config && <MarketShareChart data={m.rows} />}
-                    {m.query_type === 'facturacion' && m.rows && !m.chart_config && <ClienteAnalysisChart data={m.rows} />}
+                    {m.type === 'bot' && (
+                      <ExportButtons message={m} chartConfig={m.chart_config} chartData={m.rows} />
+                    )}
                   </div>
-                ))}
+                  {m.chart_config && m.rows && <DynamicChart data={m.rows} config={m.chart_config} />}
+                  {m.query_type === 'ranking' && m.rows && !m.chart_config && <TopClientesChart data={m.rows} />}
+                  {m.query_type === 'ranking' && m.rows && !m.chart_config && <MarketShareChart data={m.rows} />}
+                  {m.query_type === 'facturacion' && m.rows && !m.chart_config && <ClienteAnalysisChart data={m.rows} />}
+                </div>
+              ))}
               {loading && (
                 <div className="message bot">
                   <div className="message-bubble loading">Processing...</div>

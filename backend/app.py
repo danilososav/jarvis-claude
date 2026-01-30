@@ -84,9 +84,12 @@ class Conversation(Base):
     __tablename__ = 'conversations'
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer)
+    session_id = Column(String(50))  # NUEVO: agrupar chats
     query = Column(Text)
     response = Column(Text)
     query_type = Column(String(50))
+    chart_config = Column(Text)
+    chart_data = Column(Text)
     created_at = Column(DateTime, default=datetime.now)
 
 class TrainerFeedback(Base):
@@ -437,34 +440,50 @@ def verify_user(user_id):
         return jsonify({'error': str(e)}), 500
 
 # ==================== QUERY ENDPOINTS ====================
-
 @app.route('/api/chat/history', methods=['GET'])
 @token_required
 def get_chat_history(user_id):
-    """Obtener historial de chat del usuario"""
+    """Obtener historial agrupado por sesión"""
     try:
         session = Session()
         
+        # Obtener todas las conversaciones
         conversations = session.query(Conversation)\
             .filter_by(user_id=user_id)\
             .order_by(Conversation.created_at.desc())\
-            .limit(50)\
             .all()
         
-        result = [{
-            "id": c.id,
-            "query": c.query,
-            "response": c.response,
-            "query_type": c.query_type,
-            "created_at": c.created_at.isoformat()
-        } for c in conversations]
+        # Agrupar por session_id
+        grouped = {}
+        for c in conversations:
+            sid = c.session_id or f"session_{user_id}"
+            if sid not in grouped:
+                grouped[sid] = []
+            grouped[sid].append({
+                "id": c.id,
+                "query": c.query,
+                "response": c.response,
+                "query_type": c.query_type,
+                "chart_config": json.loads(c.chart_config) if c.chart_config else None,
+                "rows": json.loads(c.chart_data) if c.chart_data else None,
+                "created_at": c.created_at.isoformat()
+            })
+        
+        # Convertir a lista de sesiones
+        result = []
+        for session_id, messages in grouped.items():
+            result.append({
+                "session_id": session_id,
+                "messages": messages,
+                "created_at": messages[0]["created_at"]
+            })
         
         session.close()
-        return jsonify({"success": True, "conversations": result}), 200
+        return jsonify({"success": True, "sessions": result}), 200
     except Exception as e:
         logger.error(f"Error obteniendo historial: {e}")
         return jsonify({"error": str(e)}), 500
-
+    
 @app.route('/api/chat/history/<int:conv_id>', methods=['DELETE'])
 @token_required
 def delete_conversation(user_id, conv_id):
@@ -500,6 +519,9 @@ def delete_conversation(user_id, conv_id):
 @app.route('/api/query', methods=['POST'])
 @token_required
 def query(user_id):
+    data = request.json
+    user_query = data.get('query', '').strip()
+    session_id = data.get('session_id', str(user_id))  # NUEVO
     """Procesar query con detección automática"""
     session = Session()
     user = session.query(User).filter_by(id=user_id).first()
@@ -585,23 +607,31 @@ def query(user_id):
             response_text = mock_claude_response(query_type, rows, user_query)
         
         # Guardar en BD
-        session = Session()
+        # Guardar en BD
+        session = None
         try:
+            session = Session()
             conversation = Conversation(
-                user_id=user_id,
-                query=user_query,
-                response=response_text,
-                query_type=query_type
-            )
+            user_id=user_id,
+            session_id=session_id,  # NUEVO
+            query=user_query,
+            response=response_text,
+            query_type=query_type,
+            chart_config=json.dumps(chart_config) if chart_config else None,
+            chart_data=json.dumps(rows) if rows else None
+        )
             session.add(conversation)
             session.commit()
             conv_id = conversation.id
-            log_audit(user_id, user.username, 'FEEDBACK', details=f"Feedback ID: {feedback_id}", ip_address=request.remote_addr)
+            logger.info(f"✅ Conversación guardada: {conv_id}")
         except Exception as db_err:
-            logger.error(f"Error guardando en BD: {db_err}")
+            logger.error(f"❌ Error guardando en BD: {db_err}")
+            if session:
+                session.rollback()
             conv_id = None
         finally:
-            session.close()
+            if session:
+                session.close()
         
         return jsonify({
             "success": True,
@@ -645,7 +675,10 @@ def submit_trainer_feedback(user_id):
         session.commit()
         feedback_id = feedback.id
         session.close()
-        
+
+            # AUDIT (después de cerrar session)
+        log_audit(user_id, user.username, 'FEEDBACK', details=f"Feedback ID: {feedback_id}", ip_address=request.remote_addr)
+                    
         logger.info(f"✅ Trainer feedback guardado: {feedback_id}")
         
         return jsonify({'success': True, 'feedback_id': feedback_id}), 201
