@@ -190,29 +190,52 @@ def log_audit(user_id, username, action, details='', ip_address=''):
     except Exception as e:
         logger.error(f"Error en auditoría: {e}")
 
-def find_similar_feedback(user_query):
-    """Busca feedback similar comparando QUERIES"""
+def should_generate_chart(user_query):
+    """Detecta si el usuario específicamente pide un gráfico"""
+    chart_keywords = ['gráfico', 'grafico', 'chart', 'visualiz', 'gráfica', 'grafica', 'mostrar en gráfico']
+    return any(keyword in user_query.lower() for keyword in chart_keywords)
+
+def find_similar_feedback(user_query, category=None):
+    """Busca feedback similar con threshold dinámico y categoría"""
     try:
         session = Session()
-        feedbacks = session.query(TrainerFeedback).all()
+        
+        # Si hay categoría, filtrar por esa primero
+        if category:
+            feedbacks = session.query(TrainerFeedback)\
+                .filter(TrainerFeedback.category == category)\
+                .all()
+        else:
+            feedbacks = session.query(TrainerFeedback).all()
+        
         session.close()
         
         best_match = None
         best_score = 0
-        threshold = 80
+        
+        # Threshold dinámico según longitud de query
+        query_len = len(user_query.split())
+        if query_len <= 3:
+            threshold = 75  # Queries cortas: menos exigentes
+        elif query_len <= 7:
+            threshold = 80  # Queries medianas
+        else:
+            threshold = 85  # Queries largas: más exigentes
         
         for fb in feedbacks:
             if fb.original_query:
+                # Usar token_set_ratio para más flexibilidad
                 score = fuzz.token_set_ratio(user_query.lower(), fb.original_query.lower())
                 if score > best_score:
                     best_score = score
                     best_match = fb
         
         if best_match and best_score >= threshold:
-            logger.info(f"✅ Feedback similar encontrado: score {best_score}")
+            logger.info(f"✅ Feedback similar encontrado: score {best_score}, categoría: {best_match.category}")
+            best_match.similarity_score = best_score
             return best_match
         
-        logger.info(f"❌ No hay feedback similar (mejor score: {best_score})")
+        logger.info(f"❌ No hay feedback similar (mejor score: {best_score}, threshold: {threshold})")
         return None
     except Exception as e:
         logger.error(f"Error en fuzzy matching: {e}")
@@ -574,9 +597,8 @@ def query(user_id):
             
             # Si no encontró tabla dinámica, continuar con otras detecciones
             if query_type == "generico":
-                # DETECCIÓN DE GRÁFICOS
-                # DETECCIÓN DE GRÁFICOS
-                if any(w in query_lower for w in ["gráfico", "grafico", "chart", "mostrar", "muestra", "barras", "pie", "línea", "linea"]):
+                # DETECCIÓN DE GRÁFICOS - SOLO si user explícitamente pide gráfico
+                if should_generate_chart(user_query):
                     query_type = "chart"
                     
                     if "barra" in query_lower or "bar" in query_lower:
@@ -591,11 +613,12 @@ def query(user_id):
                     rows = get_top_clientes_enriched(user_query)
                     logger.info(f"🔍 Detectado: gráfico {chart_config['type']} - rows: {len(rows)}")
                 
-                # DETECCIÓN DE RANKING
+                # DETECCIÓN DE RANKING - SIN gráfico, solo tabla
                 elif any(w in query_lower for w in ["top", "ranking", "principal", "importante", "mayor", "más", "clientes"]):
                     query_type = "ranking"
                     rows = get_top_clientes_enriched(user_query)
-                    logger.info(f"🔍 Detectado: ranking - rows: {len(rows)}")
+                    chart_config = None  # IMPORTANTE: NO generar gráfico
+                    logger.info(f"🔍 Detectado: ranking (sin gráfico) - rows: {len(rows)}")
                 
                 # DETECCIÓN DE FACTURACIÓN
                 elif any(w in query_lower for w in ["cuánto", "cuanto", "factur", "how much"]):
@@ -653,7 +676,7 @@ def query(user_id):
 @app.route('/api/trainer/feedback', methods=['POST'])
 @token_required
 def submit_trainer_feedback(user_id):
-    """Enviar corrección/feedback como trainer"""
+    """Enviar corrección/feedback como trainer con categoría y tags"""
     session = None
     try:
         session = Session()
@@ -672,19 +695,21 @@ def submit_trainer_feedback(user_id):
             original_response=data.get('original_response'),
             corrected_response=data.get('corrected_response'),
             feedback_type=data.get('feedback_type', 'correction'),
-            notes=data.get('notes', '')
+            notes=data.get('notes', ''),
+            category=data.get('category'),  # NUEVO
+            tags=json.dumps(data.get('tags', [])),  # NUEVO - JSON array
+            chart_config=json.dumps(data.get('chart_config')) if data.get('chart_config') else None,  # NUEVO
+            query_type=data.get('query_type')  # NUEVO
         )
         session.add(feedback)
         session.commit()
-        # Enviar email de notificación
-        send_email_notification(table_name, list(df.columns), user.username)
         feedback_id = feedback.id
         session.close()
         
         # Log después de cerrar sesión
-        log_audit(user_id, username, 'FEEDBACK', details=f"Feedback ID: {feedback_id}", ip_address=request.remote_addr)
+        log_audit(user_id, username, 'FEEDBACK', details=f"Feedback ID: {feedback_id}, Categoría: {data.get('category')}", ip_address=request.remote_addr)
         
-        logger.info(f"✅ Trainer feedback guardado: {feedback_id}")
+        logger.info(f"✅ Trainer feedback guardado: {feedback_id}, categoría: {data.get('category')}")
         
         return jsonify({'success': True, 'feedback_id': feedback_id}), 201
         
@@ -698,7 +723,7 @@ def submit_trainer_feedback(user_id):
 @app.route('/api/trainer/feedback', methods=['GET'])
 @token_required
 def get_trainer_feedback(user_id):
-    """Obtener feedback guardado"""
+    """Obtener feedback guardado con opción de filtrar por categoría"""
     try:
         session = Session()
         user = session.query(User).filter_by(id=user_id).first()
@@ -707,24 +732,58 @@ def get_trainer_feedback(user_id):
             session.close()
             return jsonify({'error': 'Solo trainers pueden ver feedback'}), 403
         
-        feedbacks = session.query(TrainerFeedback)\
-            .filter_by(user_id=user_id)\
-            .order_by(TrainerFeedback.created_at.desc())\
-            .limit(100)\
-            .all()
+        # Parámetro opcional para filtrar por categoría
+        category = request.args.get('category')
+        
+        query = session.query(TrainerFeedback).order_by(TrainerFeedback.created_at.desc())
+        
+        if category:
+            query = query.filter_by(category=category)
+        
+        feedbacks = query.limit(100).all()
         
         result = [{
             "id": f.id,
             "conversation_id": f.conversation_id,
-            "original_response": f.original_response[:100],
-            "corrected_response": f.corrected_response[:100],
+            "original_query": f.original_query,
+            "original_response": f.original_response[:100] if f.original_response else None,
+            "corrected_response": f.corrected_response[:100] if f.corrected_response else None,
             "feedback_type": f.feedback_type,
             "notes": f.notes,
+            "category": f.category,
+            "tags": json.loads(f.tags) if f.tags else [],
+            "query_type": f.query_type,
+            "similarity_score": f.similarity_score,
             "created_at": f.created_at.isoformat()
         } for f in feedbacks]
         
         session.close()
         return jsonify({'success': True, 'feedbacks': result}), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/trainer/feedback/categories', methods=['GET'])
+@token_required
+def get_feedback_categories(user_id):
+    """Obtener lista de categorías disponibles"""
+    try:
+        session = Session()
+        user = session.query(User).filter_by(id=user_id).first()
+        
+        if not user or user.role != 'trainer':
+            session.close()
+            return jsonify({'error': 'Solo trainers'}), 403
+        
+        categories = session.query(TrainerFeedback.category)\
+            .filter(TrainerFeedback.category.isnot(None))\
+            .distinct()\
+            .all()
+        
+        categories = [c[0] for c in categories]
+        session.close()
+        
+        return jsonify({'success': True, 'categories': categories}), 200
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1163,6 +1222,7 @@ def get_audit_logs(user_id):
 
 @app.route('/api/trainer/tables', methods=['GET'])
 @token_required
+
 def get_tables(user_id):
     """Obtener lista de tablas dinámicas creadas por usuarios"""
     try:

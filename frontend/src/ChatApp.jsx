@@ -239,9 +239,9 @@ export default function ChatApp() {
                     )}
                   </div>
                   {m.chart_config && m.rows && <DynamicChart data={m.rows} config={m.chart_config} />}
-                  {m.query_type === 'ranking' && m.rows && !m.chart_config && <TopClientesChart data={m.rows} />}
+                  {/* {m.query_type === 'ranking' && m.rows && !m.chart_config && <TopClientesChart data={m.rows} />}
                   {m.query_type === 'ranking' && m.rows && !m.chart_config && <MarketShareChart data={m.rows} />}
-                  {m.query_type === 'facturacion' && m.rows && !m.chart_config && <ClienteAnalysisChart data={m.rows} />}
+                  {m.query_type === 'facturacion' && m.rows && !m.chart_config && <ClienteAnalysisChart data={m.rows} />} */}
                 </div>
               ))}
               {loading && (
