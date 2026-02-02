@@ -10,6 +10,7 @@ import { DynamicChart } from './DynamicChart';
 import { UploadExcel } from './UploadExcel';
 import { ExportButtons } from './ExportButtons';
 import { AuditLogs } from './AuditLogs';
+import { ImportExport } from './ImportExport';
 
 const API_URL = 'http://127.0.0.1:5000/api';
 
@@ -147,6 +148,7 @@ export default function ChatApp() {
         </button>
         <UploadExcel />
         <AuditLogs />
+        <ImportExport />
         
         <div className="history-container">
           <div className="history-label">Conversations</div>

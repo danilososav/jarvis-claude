@@ -25,6 +25,9 @@ from io import BytesIO
 import base64
 from datetime import datetime
 import plotly.graph_objects as go
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 
 
@@ -673,6 +676,8 @@ def submit_trainer_feedback(user_id):
         )
         session.add(feedback)
         session.commit()
+        # Enviar email de notificación
+        send_email_notification(table_name, list(df.columns), user.username)
         feedback_id = feedback.id
         session.close()
         
@@ -760,9 +765,24 @@ def upload_excel(user_id):
         excel_file = io.BytesIO(file.read())
         df = pd.read_excel(excel_file)
         
-        # Validar que tenga columna 'id'
-        if 'id' not in df.columns:
-            return jsonify({'error': 'Excel debe tener columna "id"'}), 400
+        logger.info(f"📊 Columnas del Excel: {list(df.columns)}")
+        
+        # NUEVO: Verificar si tabla ya existe ANTES de validar 'id'
+        table_exists = False
+        with engine.connect() as conn:
+            stmt = text(f"SELECT 1 FROM information_schema.tables WHERE table_name = '{table_name}'")
+            result = conn.execute(stmt).first()
+            table_exists = result is not None
+        
+        # Validar que tenga columna 'id' SOLO si tabla es nueva
+        if not table_exists:
+            # Tabla nueva: EXIGE 'id'
+            if 'id' not in df.columns:
+                logger.error(f"❌ Falta columna 'id' en tabla nueva")
+                return jsonify({'error': 'Excel debe tener columna "id" para tabla nueva'}), 400
+        else:
+            # Tabla existe: NO exige 'id'
+            logger.info(f"✅ Tabla {table_name} existe, omitiendo validación de 'id'")
         
         # NUEVO: Forzar rollback de transacciones previas
         try:
@@ -771,19 +791,16 @@ def upload_excel(user_id):
         except:
             pass
         
-        # Crear tabla en BD - SIN transacción explícita
+        # Crear tabla o agregar datos
         try:
             with engine.connect() as conn:
-                # Verificar si tabla ya existe
-                table_exists = False
-                try:
-                    result = conn.execute(text(f"SELECT 1 FROM information_schema.tables WHERE table_name='{table_name}'"))
-                    table_exists = result.fetchone() is not None
-                except:
-                    pass
+                rows_inserted = 0
+                errors = []
                 
                 if not table_exists:
-                    # Crear tabla
+                    # TABLA NUEVA: CREATE TABLE
+                    logger.info(f"📊 Creando tabla nueva: {table_name}")
+                    
                     columns_sql = "id SERIAL PRIMARY KEY"
                     
                     for col in df.columns:
@@ -801,11 +818,11 @@ def upload_excel(user_id):
                     conn.execute(text(create_sql))
                     conn.commit()
                     logger.info(f"✅ Tabla creada: {table_name}")
+                else:
+                    # TABLA EXISTE: Solo INSERT
+                    logger.info(f"📊 Tabla {table_name} existe, agregando datos...")
                 
-                # Insertar datos
-                rows_inserted = 0
-                errors = []
-                
+                # Insertar datos (nuevo o existente)
                 for idx, row in df.iterrows():
                     try:
                         cols = ", ".join([col for col in df.columns if col != 'id'])
@@ -822,14 +839,13 @@ def upload_excel(user_id):
                 conn.commit()
         
         except Exception as e:
-            logger.error(f"Error en creación de tabla: {e}")
+            logger.error(f"Error en tabla: {e}")
             raise
         
-        # Guardar metadata
-        try:
-            meta_session = Session()
-            existing_table = meta_session.query(DynamicTable).filter_by(table_name=table_name).first()
-            if not existing_table:
+        # Guardar metadata (solo si tabla nueva)
+        if not table_exists:
+            try:
+                meta_session = Session()
                 dynamic_table = DynamicTable(
                     table_name=table_name,
                     columns=json.dumps(list(df.columns)),
@@ -837,19 +853,31 @@ def upload_excel(user_id):
                 )
                 meta_session.add(dynamic_table)
                 meta_session.commit()
-            meta_session.close()
-        except Exception as meta_err:
-            logger.error(f"Error guardando metadata: {meta_err}")
+                meta_session.close()
+            except Exception as meta_err:
+                logger.error(f"Error guardando metadata: {meta_err}")
         
         session.close()
-        logger.info(f"✅ Tabla dinámica: {table_name} - {rows_inserted} filas")
+        
+        # Mensaje según si es tabla nueva o existente
+        if table_exists:
+            logger.info(f"✅ Tabla {table_name}: {rows_inserted} filas agregadas")
+            message = f"Se agregaron {rows_inserted} filas a la tabla {table_name}"
+        else:
+            logger.info(f"✅ Tabla dinámica: {table_name} - {rows_inserted} filas")
+            message = f"Tabla {table_name} creada con {rows_inserted} filas"
+        
+        # ENVIAR EMAIL EN AMBOS CASOS
+        send_email_notification(table_name, list(df.columns), user.username, is_new_table=not table_exists)
         
         return jsonify({
             'success': True,
             'table_name': table_name,
             'rows_inserted': rows_inserted,
             'columns': list(df.columns),
-            'errors': errors
+            'errors': errors,
+            'message': message,
+            'table_exists': table_exists
         }), 200
         
     except Exception as e:
@@ -1132,6 +1160,202 @@ def get_audit_logs(user_id):
     except Exception as e:
         logger.error(f"Error obteniendo logs: {e}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/trainer/tables', methods=['GET'])
+@token_required
+def get_tables(user_id):
+    """Obtener lista de tablas dinámicas creadas por usuarios"""
+    try:
+        session = Session()
+        user = session.query(User).filter_by(id=user_id).first()
+        
+        if not user or user.role != 'trainer':
+            session.close()
+            return jsonify({'error': 'Solo trainers'}), 403
+        
+        # Obtener solo tablas dinámicas creadas por usuarios (NO del sistema)
+        tables_from_db = session.query(DynamicTable)\
+            .filter(~DynamicTable.table_name.in_([
+                'users', 'conversations', 'trainer_feedback', 'dynamic_tables', 
+                'audit_logs', 'dim_anunciante', 'dim_anunciante_alias', 
+                'dim_anunciante_perfil', 'fac_facturacion', 'jarvis_query_logs'
+            ]))\
+            .all()
+        
+        # Verificar que las tablas existan en la BD (sincronizar)
+        valid_tables = []
+        for t in tables_from_db:
+            try:
+                with engine.connect() as conn:
+                    stmt = text(f"SELECT 1 FROM information_schema.tables WHERE table_name = '{t.table_name}'")
+                    exists = conn.execute(stmt).first()
+                    if exists:
+                        valid_tables.append(t)
+                    else:
+                        # Tabla no existe, eliminarla de DynamicTable
+                        logger.info(f"🗑️ Tabla {t.table_name} no existe en BD, eliminando de metadata")
+                        session.query(DynamicTable).filter_by(table_name=t.table_name).delete()
+                        session.commit()
+            except Exception as sync_err:
+                logger.error(f"Error sincronizando tabla {t.table_name}: {sync_err}")
+        
+        result = [{
+            "table_name": t.table_name,
+            "columns": json.loads(t.columns) if t.columns else [],
+            "created_at": t.created_at.isoformat() if t.created_at else ""
+        } for t in valid_tables]
+        
+        session.close()
+        return jsonify({'success': True, 'tables': result}), 200
+    except Exception as e:
+        logger.error(f"Error obteniendo tablas: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/trainer/export-template', methods=['POST'])
+@token_required
+def export_template(user_id):
+    """Exportar template de tabla"""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from io import BytesIO
+        import base64
+        
+        user_session = Session()
+        user = user_session.query(User).filter_by(id=user_id).first()
+        
+        if not user or user.role != 'trainer':
+            user_session.close()
+            return jsonify({'error': 'Solo trainers'}), 403
+        
+        data = request.json
+        table_name = data.get('table_name')
+        
+        if not table_name:
+            return jsonify({'error': 'table_name requerido'}), 400
+        
+        # Obtener columnas de la tabla de PostgreSQL
+        with engine.connect() as conn:
+            stmt = text(f"""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = '{table_name}'
+                ORDER BY ordinal_position
+            """)
+            result = conn.execute(stmt)
+            columns = [row[0] for row in result]
+        
+        user_session.close()
+        
+        # Omitir 'id' del template
+        columns = [col for col in columns if col != 'id']
+        
+        # Crear Excel
+        wb = Workbook()
+        ws = wb.active
+        ws.title = table_name
+        
+        # Headers
+        header_fill = PatternFill(start_color='58a6ff', end_color='58a6ff', fill_type='solid')
+        header_font = Font(color='FFFFFF', bold=True)
+        
+        for col_num, col_name in enumerate(columns, 1):
+            cell = ws.cell(row=1, column=col_num)
+            cell.value = col_name
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center')
+        
+        # Auto-ajustar ancho
+        for col in ws.columns:
+            max_length = len(str(col[0].value)) if col[0].value else 0
+            ws.column_dimensions[col[0].column_letter].width = max(max_length + 2, 15)
+        
+        # Guardar en memoria
+        excel_buffer = BytesIO()
+        wb.save(excel_buffer)
+        excel_buffer.seek(0)
+        excel_base64 = base64.b64encode(excel_buffer.read()).decode()
+        
+        return jsonify({
+            'success': True,
+            'excel': excel_base64,
+            'filename': f'{table_name}_template.xlsx'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error exportando template: {e}")
+        return jsonify({'error': str(e)}), 500
+
+def send_email_notification(table_name, columns, username, is_new_table=True):
+    """Enviar email de notificación de nueva tabla o datos agregados"""
+    try:
+        sender_email = "danilo.sosa@texo.com.py"
+        sender_password = "yfvp aiws uorn ycsr"
+        receiver_email = "danilo.sosa@texo.com.py"
+        
+        # Cambiar título y contenido según si es tabla nueva o INSERT
+        if is_new_table:
+            subject = f"🔔 Nueva tabla creada: {table_name}"
+            title = "Nueva Tabla Creada en JARVIS"
+            action = "⚠️ Acción requerida: Integra esta tabla en JARVIS si es necesario."
+        else:
+            subject = f"📊 Datos agregados a tabla: {table_name}"
+            title = "Datos Agregados a Tabla en JARVIS"
+            action = "ℹ️ Información: Se han agregado datos a la tabla existente."
+        
+        message = MIMEMultipart("alternative")
+        message["Subject"] = subject
+        message["From"] = sender_email
+        message["To"] = receiver_email
+        
+        html = f"""\
+        <html>
+          <body style="font-family: Arial, sans-serif;">
+            <h2 style="color: #58a6ff;">{title}</h2>
+            <table style="border-collapse: collapse; width: 100%;">
+              <tr style="background: #21262d;">
+                <td style="padding: 8px; border: 1px solid #30363d;"><strong>Tabla:</strong></td>
+                <td style="padding: 8px; border: 1px solid #30363d;">{table_name}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px; border: 1px solid #30363d;"><strong>Columnas:</strong></td>
+                <td style="padding: 8px; border: 1px solid #30363d;">{', '.join(columns)}</td>
+              </tr>
+              <tr style="background: #21262d;">
+                <td style="padding: 8px; border: 1px solid #30363d;"><strong>Usuario:</strong></td>
+                <td style="padding: 8px; border: 1px solid #30363d;">{username}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px; border: 1px solid #30363d;"><strong>Fecha:</strong></td>
+                <td style="padding: 8px; border: 1px solid #30363d;">{datetime.now().strftime('%d/%m/%Y %H:%M')}</td>
+              </tr>
+            </table>
+            <hr style="border: none; border-top: 1px solid #30363d; margin: 20px 0;">
+            <p><strong>{action}</strong></p>
+            <p>Cuando esté lista, notifica al usuario con este mensaje:</p>
+            <p style="background: #21262d; padding: 10px; border-radius: 4px;"><code>✅ Tabla '{table_name}' ya está disponible para consultas en JARVIS</code></p>
+          </body>
+        </html>
+        """
+        
+        part = MIMEText(html, "html")
+        message.attach(part)
+        
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, receiver_email, message.as_string())
+        
+        logger.info(f"✅ Email enviado: tabla {table_name}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error enviando email: {e}")
+        return False
+        logger.info(f"📧 Intentando enviar email...")
+        logger.info(f"De: {sender_email}")
+        logger.info(f"Para: {receiver_email}")
+        logger.info(f"Tabla: {table_name}")
 
 if __name__ == '__main__':
     logger.info("🚀 JARVIS Backend + Tablas Dinámicas iniciando...")
