@@ -195,8 +195,21 @@ def should_generate_chart(user_query):
     chart_keywords = ['gráfico', 'grafico', 'chart', 'visualiz', 'gráfica', 'grafica', 'mostrar en gráfico']
     return any(keyword in user_query.lower() for keyword in chart_keywords)
 
+def extract_numbers(query):
+    """Extrae todos los números de la query"""
+    import re
+    numbers = re.findall(r'\d+', query)
+    return sorted([int(n) for n in numbers])
+
+def normalize_query_for_matching(query):
+    """Normaliza query removiendo números para comparación fuzzy"""
+    import re
+    # Reemplaza números con placeholder genérico
+    normalized = re.sub(r'\d+', 'NUM', query)
+    return normalized.lower()
+
 def find_similar_feedback(user_query, category=None):
-    """Busca feedback similar con threshold dinámico y categoría"""
+    """Busca feedback similar con threshold dinámico y categoría, validando números"""
     try:
         session = Session()
         
@@ -213,6 +226,10 @@ def find_similar_feedback(user_query, category=None):
         best_match = None
         best_score = 0
         
+        # Normalizar query del usuario (remover números)
+        normalized_user_query = normalize_query_for_matching(user_query)
+        user_numbers = extract_numbers(user_query)
+        
         # Threshold dinámico según longitud de query
         query_len = len(user_query.split())
         if query_len <= 3:
@@ -224,15 +241,27 @@ def find_similar_feedback(user_query, category=None):
         
         for fb in feedbacks:
             if fb.original_query:
-                # Usar token_set_ratio para más flexibilidad
-                score = fuzz.token_set_ratio(user_query.lower(), fb.original_query.lower())
+                # Normalizar query guardada
+                normalized_fb_query = normalize_query_for_matching(fb.original_query)
+                fb_numbers = extract_numbers(fb.original_query)
+                
+                # Comparar queries normalizadas (sin números)
+                score = fuzz.token_set_ratio(normalized_user_query, normalized_fb_query)
+                
+                # IMPORTANTE: Si ambas tienen números y son diferentes, penalizar el score
+                if user_numbers and fb_numbers:
+                    if user_numbers != fb_numbers:
+                        # Números diferentes = no es un buen match
+                        score = score * 0.5  # Reducir score significativamente
+                        logger.info(f"⚠️ Números diferentes: usuario {user_numbers} vs guardada {fb_numbers}")
+                
                 if score > best_score:
                     best_score = score
                     best_match = fb
         
         if best_match and best_score >= threshold:
             logger.info(f"✅ Feedback similar encontrado: score {best_score}, categoría: {best_match.category}")
-            best_match.similarity_score = best_score
+            best_match.similarity_score = int(best_score)
             return best_match
         
         logger.info(f"❌ No hay feedback similar (mejor score: {best_score}, threshold: {threshold})")
@@ -278,10 +307,21 @@ def mock_claude_response(query_type, rows, user_query):
         return "Consulta procesada."
 
 def get_top_clientes_enriched(query):
-    """Top 5 clientes por facturación"""
+    """Top N clientes por facturación - extrae número dinámicamente de la query"""
     try:
+        import re
+        
+        # Extraer número de la query (top 5, top 10, etc)
+        numbers = re.findall(r'\b(\d+)\b', query)
+        limit = int(numbers[0]) if numbers else 5  # Default a 5 si no hay número
+        
+        # Validar que el número sea razonable (máximo 50)
+        limit = min(limit, 50)
+        
+        logger.info(f"📊 Extrayendo TOP {limit} clientes de la query: {query}")
+        
         with engine.connect() as conn:
-            stmt = text("""
+            stmt = text(f"""
                 SELECT 
                     d.nombre_canonico,
                     SUM(f.facturacion)::float as facturacion,
@@ -293,7 +333,7 @@ def get_top_clientes_enriched(query):
                 GROUP BY d.anunciante_id, d.nombre_canonico
                 HAVING SUM(f.facturacion) > 0
                 ORDER BY facturacion DESC
-                LIMIT 5
+                LIMIT {limit}
             """)
             rows = conn.execute(stmt).fetchall()
             

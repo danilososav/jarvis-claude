@@ -8,9 +8,10 @@ import './Charts.css';
 import { TrainerMode } from './TrainerMode';
 import { DynamicChart } from './DynamicChart';
 import { UploadExcel } from './UploadExcel';
+import { ImportExport } from './ImportExport';
 import { ExportButtons } from './ExportButtons';
 import { AuditLogs } from './AuditLogs';
-import { ImportExport } from './ImportExport';
+import { SavedResponses } from './SavedResponses';
 
 const API_URL = 'http://127.0.0.1:5000/api';
 
@@ -146,9 +147,9 @@ export default function ChatApp() {
         <button className="new-chat-btn" onClick={handleNewChat}>
           + New Chat
         </button>
-        <UploadExcel />
-        <AuditLogs />
         <ImportExport />
+        <SavedResponses />
+        <AuditLogs />
         
         <div className="history-container">
           <div className="history-label">Conversations</div>
@@ -239,9 +240,9 @@ export default function ChatApp() {
                     )}
                   </div>
                   {m.chart_config && m.rows && <DynamicChart data={m.rows} config={m.chart_config} />}
-                  {/* {m.query_type === 'ranking' && m.rows && !m.chart_config && <TopClientesChart data={m.rows} />}
+                  {m.query_type === 'ranking' && m.rows && !m.chart_config && <TopClientesChart data={m.rows} />}
                   {m.query_type === 'ranking' && m.rows && !m.chart_config && <MarketShareChart data={m.rows} />}
-                  {m.query_type === 'facturacion' && m.rows && !m.chart_config && <ClienteAnalysisChart data={m.rows} />} */}
+                  {m.query_type === 'facturacion' && m.rows && !m.chart_config && <ClienteAnalysisChart data={m.rows} />}
                 </div>
               ))}
               {loading && (
