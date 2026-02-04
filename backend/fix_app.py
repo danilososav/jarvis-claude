@@ -917,7 +917,6 @@ def get_analisis_completo(query):
     query_limpio = query.replace('?', '').replace('!', '').replace(',', '')
     palabras = query_limpio.split()
     
-    # Buscar palabras que parecen nombres (no verbos comunes)
     verbos_comunes = ['cuanto', 'cuánto', 'invirtio', 'invirtió', 'en', 'y', 'tv', 'radio', 'de', 'es', 'fue', 'son', 'tiene']
     cliente = " ".join([p for p in palabras if p.lower() not in verbos_comunes and len(p) > 2])
     
@@ -928,14 +927,14 @@ def get_analisis_completo(query):
         with engine.connect() as conn:
             stmt = text("""
                 SELECT 
-                    d.nombre_canonico,
+                    COALESCE(p.nombre_anunciante, f.cliente_original) as cliente,
                     SUM(f.facturacion)::float as facturacion_total,
                     AVG(f.facturacion)::float as promedio_mensual,
                     p.cluster,
-                    p.inversion_en_tv_abierta_2024_en_miles_usd,
-                    p.inversion_en_cable_2024_en_miles_usd,
-                    p.inversion_en_radio_2024_en_miles_usd,
-                    p.inversion_en_pdv_2024_en_miles_usd,
+                    COALESCE(NULLIF(p.inversion_en_tv_abierta_2024_en_miles_usd, '')::numeric, 0)::float as inversion_tv,
+                    COALESCE(NULLIF(p.inversion_en_cable_2024_en_miles_usd, '')::numeric, 0)::float as inversion_cable,
+                    COALESCE(NULLIF(p.inversion_en_radio_2024_en_miles_usd, '')::numeric, 0)::float as inversion_radio,
+                    COALESCE(NULLIF(p.inversion_en_pdv_2024_en_miles_usd, '')::numeric, 0)::float as inversion_pdv,
                     p.en_que_medios_invierte_la_empresa_principalmente,
                     p.la_empresa_invierte_en_marketing_digital,
                     p.puntaje_total,
@@ -945,11 +944,11 @@ def get_analisis_completo(query):
                     p.ejecucion,
                     p.inversion,
                     MAX(f.anio) as ultimo_año
-                FROM dim_anunciante d
-                LEFT JOIN dim_anunciante_perfil p ON d.anunciante_id = p.anunciante_id
-                LEFT JOIN fact_facturacion f ON d.anunciante_id = f.anunciante_id AND f.facturacion > 0
-                WHERE UPPER(d.nombre_canonico) LIKE UPPER(:cliente)
-                GROUP BY d.anunciante_id, d.nombre_canonico, p.id, p.cluster, 
+                FROM fact_facturacion f
+                LEFT JOIN dim_anunciante_perfil p ON LOWER(TRIM(p.nombre_anunciante)) = LOWER(TRIM(f.cliente_original))
+                WHERE f.facturacion > 0
+                  AND (LOWER(f.cliente_original) LIKE LOWER(:cliente) OR LOWER(p.nombre_anunciante) LIKE LOWER(:cliente))
+                GROUP BY COALESCE(p.nombre_anunciante, f.cliente_original), p.cluster, 
                          p.inversion_en_tv_abierta_2024_en_miles_usd, p.inversion_en_cable_2024_en_miles_usd,
                          p.inversion_en_radio_2024_en_miles_usd, p.inversion_en_pdv_2024_en_miles_usd,
                          p.en_que_medios_invierte_la_empresa_principalmente, p.la_empresa_invierte_en_marketing_digital,

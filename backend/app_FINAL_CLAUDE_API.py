@@ -35,11 +35,12 @@ from email.mime.multipart import MIMEMultipart
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy import text
+from app_claude_integration import handle_query_with_claude
 
 import base64
 from io import BytesIO
 import plotly.graph_objects as go
-from claude_handler_v2 import ClaudeHandler
+        
 
 
 load_dotenv()
@@ -50,14 +51,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-# Inicializar Claude Handler
-ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
-claude_handler = ClaudeHandler(ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
-if claude_handler:
-    logger.info("✅ Claude Sonnet 4.5 inicializado")
-else:
-    logger.warning("⚠️ ANTHROPIC_API_KEY no encontrada - usando respuestas mock")
 
 # Flask app
 app = Flask(__name__)
@@ -251,37 +244,13 @@ def find_similar_feedback(user_query, category=None):
 
 # ==================== QUERIES A LA BD ====================
 
-def generate_response(query_type, rows, user_query):
-    """
-    Genera respuesta usando Claude API si está disponible, 
-    sino usa respuesta mock básica
-    """
+def mock_claude_response(query_type, rows, user_query):
+    """Respuestas inteligentes sin usar API Claude"""
     
-    # Si hay respuesta corregida por trainer, usarla directamente
     if query_type == "corrected":
         return "Respuesta corregida por entrenador"
     
-    # Intentar usar Claude API primero
-    if claude_handler and rows:
-        try:
-            response = claude_handler.enhance_response(
-                user_query=user_query,
-                data=rows,
-                query_type=query_type
-            )
-            if response:
-                return response
-        except Exception as e:
-            logger.error(f"❌ Error usando Claude: {e}")
-    
-    # Fallback a respuestas mock si Claude no está disponible
-    return _mock_response_fallback(query_type, rows, user_query)
-
-
-def _mock_response_fallback(query_type, rows, user_query):
-    """Respuestas básicas cuando Claude API no está disponible"""
-    
-    if query_type == "dynamic_table":
+    elif query_type == "dynamic_table":
         if rows:
             return f"Encontré {len(rows)} registros en esa tabla. Primeros registros: {str(rows[:2])}"
         return "No hay datos en esa tabla."
@@ -662,7 +631,7 @@ def query(user_id):
                     return jsonify({"success": False, "response": "Consulta no reconocida. Prueba: 'Top 5 clientes', 'Gráfico de barras', 'Cuánto facturó CERVEPAR?'"}), 200
             
             # Generar respuesta si no es corregida
-            response_text = generate_response(query_type, rows, user_query)
+            response_text = mock_claude_response(query_type, rows, user_query)
         
         # Guardar en BD
         # Guardar en BD
