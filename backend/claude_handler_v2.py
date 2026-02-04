@@ -56,6 +56,31 @@ class ClaudeHandler:
                 logger.error(f"❌ Error API Claude: {e}")
                 return self._fallback_response(query_type, data)
     
+    def call_claude_raw(self, prompt: str, max_tokens: int = 1500, temperature: float = 0.2) -> str:
+        """
+        Llamada directa a Claude API sin procesamiento adicional
+        Usado para validación de feedback
+        """
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            return response.content[0].text.strip()
+            
+        except RateLimitError:
+            logger.error("❌ Rate limit en call_claude_raw")
+            raise
+        except APIError as e:
+            logger.error(f"❌ API Error en call_claude_raw: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"❌ Error inesperado en call_claude_raw: {e}")
+            raise
+    
     def _get_system_prompt(self) -> str:
         """System prompt: Define personalidad y comportamiento"""
         return """Eres JARVIS, el sistema de Business Intelligence de una agencia de medios y publicidad en Paraguay.

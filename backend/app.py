@@ -28,7 +28,7 @@ import plotly.graph_objects as go
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-
+from validate_feedback import validate_feedback_with_claude, format_validation_for_trainer
 
 
 # SQLAlchemy
@@ -40,6 +40,14 @@ import base64
 from io import BytesIO
 import plotly.graph_objects as go
 from claude_handler_v2 import ClaudeHandler
+from chart_utils import (
+    detect_query_intent, 
+    build_chart_config,
+    should_include_chart,
+    should_include_text,
+    build_table_config,
+    build_kpi_config
+)
 
 
 load_dotenv()
@@ -113,6 +121,21 @@ class TrainerFeedback(Base):
     corrected_response = Column(Text)
     feedback_type = Column(String(50))
     notes = Column(Text)
+    category = Column(String(50))  # NUEVO
+    tags = Column(Text)  # NUEVO - JSON array
+    chart_config = Column(Text)  # NUEVO - JSON config
+    query_type = Column(String(50))  # NUEVO
+    similarity_score = Column(Integer)  # NUEVO
+    # Columnas de validación
+    status = Column(String(20), default='pending')  # NUEVO
+    validation_verdict = Column(String(20))  # NUEVO
+    validation_reasoning = Column(Text)  # NUEVO
+    validation_date = Column(DateTime)  # NUEVO
+    escalation_reason = Column(Text)  # NUEVO
+    escalation_date = Column(DateTime)  # NUEVO
+    resolved_by = Column(String(50))  # NUEVO
+    resolution = Column(Text)  # NUEVO
+    resolution_date = Column(DateTime)  # NUEVO
     created_at = Column(DateTime, default=datetime.now)
 
 class DynamicTable(Base):
@@ -198,23 +221,24 @@ def log_audit(user_id, username, action, details='', ip_address=''):
     except Exception as e:
         logger.error(f"Error en auditoría: {e}")
 
-def should_generate_chart(user_query):
-    """Detecta si el usuario específicamente pide un gráfico"""
-    chart_keywords = ['gráfico', 'grafico', 'chart', 'visualiz', 'gráfica', 'grafica', 'mostrar en gráfico']
-    return any(keyword in user_query.lower() for keyword in chart_keywords)
-
 def find_similar_feedback(user_query, category=None):
-    """Busca feedback similar con threshold dinámico y categoría"""
+    """Busca feedback similar con threshold dinámico y categoría - SOLO APROBADOS"""
     try:
         session = Session()
+        
+        # SOLO buscar feedback aprobado
+        approved_statuses = ['auto_approved', 'manually_approved']
         
         # Si hay categoría, filtrar por esa primero
         if category:
             feedbacks = session.query(TrainerFeedback)\
                 .filter(TrainerFeedback.category == category)\
+                .filter(TrainerFeedback.status.in_(approved_statuses))\
                 .all()
         else:
-            feedbacks = session.query(TrainerFeedback).all()
+            feedbacks = session.query(TrainerFeedback)\
+                .filter(TrainerFeedback.status.in_(approved_statuses))\
+                .all()
         
         session.close()
         
@@ -577,127 +601,181 @@ def delete_conversation(user_id, conv_id):
 @app.route('/api/query', methods=['POST'])
 @token_required
 def query(user_id):
+    """Procesar query con sistema de gráficos y texto separados"""
     data = request.json
     user_query = data.get('query', '').strip()
-    session_id = data.get('session_id', str(user_id))  # NUEVO
-    """Procesar query con detección automática"""
+    session_id = data.get('session_id', str(user_id))
+    
     session = Session()
     user = session.query(User).filter_by(id=user_id).first()
     username = user.username if user else 'unknown'
     session.close()
     
-    data = request.json
-    user_query = data.get('query', '').strip()
-    log_audit(user_id, user.username, 'QUERY', details=user_query[:100], ip_address=request.remote_addr)
+    log_audit(user_id, username, 'QUERY', details=user_query[:100], ip_address=request.remote_addr)
 
     if not user_query:
         return jsonify({"error": "Query vacío"}), 400
     
     try:
         query_lower = user_query.lower()
-        rows = []
-        query_type = "generico"
-        chart_config = None
-        response_text = None
         
-        # BUSCAR FEEDBACK SIMILAR PRIMERO
+        # Detectar intención: chart_only, text_only, o chart_and_text
+        intent = detect_query_intent(user_query)
+        logger.info(f"🎯 Intención detectada: {intent}")
+        
+        # BUSCAR FEEDBACK SIMILAR PRIMERO (prioridad máxima)
         similar_feedback = find_similar_feedback(user_query)
         if similar_feedback:
             response_text = similar_feedback.corrected_response
-            query_type = "corrected"
-            logger.info(f"✅ Usando respuesta corregida por trainer")
-        else:
-            # DETECCIÓN DE TABLAS DINÁMICAS
-            dynamic_session = Session()
-            try:
-                dynamic_tables = dynamic_session.query(DynamicTable).all()
-                for dt in dynamic_tables:
-                    if dt.table_name in query_lower:
-                        query_type = "dynamic_table"
-                        try:
-                            with engine.connect() as conn:
-                                stmt = text(f"SELECT * FROM {dt.table_name} LIMIT 10")
-                                result = conn.execute(stmt).fetchall()
-                                rows = [dict(row._mapping) for row in result]
-                                logger.info(f"🔍 Tabla dinámica detectada: {dt.table_name}")
-                        except Exception as e:
-                            logger.error(f"Error queryando tabla dinámica: {e}")
-                            rows = []
-                        break
-            finally:
-                dynamic_session.close()
-            
-            # Si no encontró tabla dinámica, continuar con otras detecciones
-            if query_type == "generico":
-                # DETECCIÓN DE GRÁFICOS - SOLO si user explícitamente pide gráfico
-                if should_generate_chart(user_query):
-                    query_type = "chart"
-                    
-                    if "barra" in query_lower or "bar" in query_lower:
-                        chart_config = {"type": "bar"}
-                    elif "pie" in query_lower or "torta" in query_lower or "circular" in query_lower:
-                        chart_config = {"type": "pie"}
-                    elif "línea" in query_lower or "linea" in query_lower or "line" in query_lower:
-                        chart_config = {"type": "line"}
-                    else:
-                        chart_config = {"type": "bar"}  # Default a bar
-                    
-                    rows = get_top_clientes_enriched(user_query)
-                    logger.info(f"🔍 Detectado: gráfico {chart_config['type']} - rows: {len(rows)}")
-                
-                # DETECCIÓN DE RANKING - SIN gráfico, solo tabla
-                elif any(w in query_lower for w in ["top", "ranking", "principal", "importante", "mayor", "más", "clientes"]):
-                    query_type = "ranking"
-                    rows = get_top_clientes_enriched(user_query)
-                    chart_config = None  # IMPORTANTE: NO generar gráfico
-                    logger.info(f"🔍 Detectado: ranking (sin gráfico) - rows: {len(rows)}")
-                
-                # DETECCIÓN DE FACTURACIÓN
-                elif any(w in query_lower for w in ["cuánto", "cuanto", "factur", "how much"]):
-                    query_type = "facturacion"
-                    rows = get_facturacion_enriched(user_query)
-                    logger.info(f"🔍 Detectado: facturacion - rows: {len(rows)}")
-                
-                else:
-                    return jsonify({"success": False, "response": "Consulta no reconocida. Prueba: 'Top 5 clientes', 'Gráfico de barras', 'Cuánto facturó CERVEPAR?'"}), 200
-            
-            # Generar respuesta si no es corregida
-            response_text = generate_response(query_type, rows, user_query)
+            return jsonify({
+                "success": True,
+                "responses": [{
+                    "type": "text",
+                    "content": response_text,
+                    "query_type": "corrected"
+                }]
+            }), 200
         
-        # Guardar en BD
-        # Guardar en BD
-        session = None
+        # DETECCIÓN DE TABLAS DINÁMICAS
+        dynamic_session = Session()
+        try:
+            dynamic_tables = dynamic_session.query(DynamicTable).all()
+            for dt in dynamic_tables:
+                if dt.table_name in query_lower:
+                    with engine.connect() as conn:
+                        stmt = text(f"SELECT * FROM {dt.table_name} LIMIT 10")
+                        result = conn.execute(stmt).fetchall()
+                        rows = [dict(row._mapping) for row in result]
+                        
+                    response_text = f"Encontré {len(rows)} registros en la tabla {dt.table_name}"
+                    return jsonify({
+                        "success": True,
+                        "responses": [{
+                            "type": "text",
+                            "content": response_text,
+                            "query_type": "dynamic_table",
+                            "data": rows
+                        }]
+                    }), 200
+        finally:
+            dynamic_session.close()
+        
+        # DETECCIÓN DE TIPO DE QUERY
+        rows = []
+        query_type = "generico"
+        
+        if any(w in query_lower for w in ["top", "ranking", "principal", "importante", "mayor", "más", "clientes"]):
+            query_type = "ranking"
+            rows = get_top_clientes_enriched(user_query)
+            logger.info(f"🔍 Detectado: ranking - rows: {len(rows)}")
+        
+        elif any(w in query_lower for w in ["cuánto", "cuanto", "factur", "how much"]):
+            query_type = "facturacion"
+            rows = get_facturacion_enriched(user_query)
+            logger.info(f"🔍 Detectado: facturacion - rows: {len(rows)}")
+        
+        else:
+            return jsonify({
+                "success": False, 
+                "response": "Consulta no reconocida. Prueba: 'Top 5 clientes', 'Gráfico de top 5', 'Cuánto facturó CERVEPAR?'"
+            }), 200
+        
+        # CONSTRUIR RESPUESTAS SEGÚN INTENCIÓN
+        responses = []
+        
+        if intent == "table_only":
+            # Solo tabla
+            table_config = build_table_config(query_type, rows, user_query)
+            responses.append({
+                "type": "table",
+                "table_config": table_config,
+                "data": rows,
+                "query_type": query_type
+            })
+        
+        elif intent == "kpi_only":
+            # Solo KPI card
+            kpi_config = build_kpi_config(query_type, rows, user_query)
+            responses.append({
+                "type": "kpi",
+                "kpi_config": kpi_config,
+                "data": rows,
+                "query_type": query_type
+            })
+        
+        elif intent == "chart_and_text":
+            # Mensaje informativo
+            responses.append({
+                "type": "info",
+                "content": "📊 Te muestro el gráfico y el análisis por separado"
+            })
+            
+            # Gráfico
+            chart_config = build_chart_config(user_query, query_type, rows)
+            responses.append({
+                "type": "chart",
+                "chart_config": chart_config,
+                "data": rows,
+                "query_type": query_type
+            })
+            
+            # Análisis de Claude
+            analysis_text = generate_response(query_type, rows, user_query)
+            responses.append({
+                "type": "text",
+                "content": analysis_text,
+                "query_type": query_type,
+                "data": rows
+            })
+        
+        elif intent == "chart_only":
+            # Solo gráfico con metadatos de Python
+            chart_config = build_chart_config(user_query, query_type, rows)
+            responses.append({
+                "type": "chart",
+                "chart_config": chart_config,
+                "data": rows,
+                "query_type": query_type,
+            })
+        
+        else:  # text_only
+            # Solo análisis de Claude
+            analysis_text = generate_response(query_type, rows, user_query)
+            responses.append({
+                "type": "text",
+                "content": analysis_text,
+                "query_type": query_type,
+                "data": rows
+            })
+        
+        # Guardar en BD (solo el primer mensaje principal)
         try:
             session = Session()
+            main_response = responses[-1]  # Última respuesta (la más importante)
+            
             conversation = Conversation(
-            user_id=user_id,
-            session_id=session_id,  # NUEVO
-            query=user_query,
-            response=response_text,
-            query_type=query_type,
-            chart_config=json.dumps(chart_config) if chart_config else None,
-            chart_data=json.dumps(rows) if rows else None
-        )
+                user_id=user_id,
+                session_id=session_id,
+                query=user_query,
+                response=main_response.get('content', ''),
+                query_type=query_type,
+                chart_config=json.dumps(main_response.get('chart_config')) if main_response.get('chart_config') else None,
+                chart_data=json.dumps(rows) if rows else None
+            )
             session.add(conversation)
             session.commit()
             conv_id = conversation.id
             logger.info(f"✅ Conversación guardada: {conv_id}")
+            session.close()
         except Exception as db_err:
             logger.error(f"❌ Error guardando en BD: {db_err}")
             if session:
                 session.rollback()
-            conv_id = None
-        finally:
-            if session:
                 session.close()
         
         return jsonify({
             "success": True,
-            "response": response_text,
-            "query_type": query_type,
-            "chart_config": chart_config,
-            "rows": rows,
-            "conversation_id": conv_id
+            "responses": responses
         }), 200
         
     except Exception as e:
@@ -708,7 +786,7 @@ def query(user_id):
 @app.route('/api/trainer/feedback', methods=['POST'])
 @token_required
 def submit_trainer_feedback(user_id):
-    """Enviar corrección/feedback como trainer con categoría y tags"""
+    """Enviar corrección/feedback como trainer con validación automática de Claude"""
     session = None
     try:
         session = Session()
@@ -720,6 +798,8 @@ def submit_trainer_feedback(user_id):
             return jsonify({'error': 'Solo trainers pueden enviar feedback'}), 403
         
         data = request.json
+        
+        # Crear feedback con status pendiente
         feedback = TrainerFeedback(
             conversation_id=data.get('conversation_id'),
             user_id=user_id,
@@ -728,22 +808,71 @@ def submit_trainer_feedback(user_id):
             corrected_response=data.get('corrected_response'),
             feedback_type=data.get('feedback_type', 'correction'),
             notes=data.get('notes', ''),
-            category=data.get('category'),  # NUEVO
-            tags=json.dumps(data.get('tags', [])),  # NUEVO - JSON array
-            chart_config=json.dumps(data.get('chart_config')) if data.get('chart_config') else None,  # NUEVO
-            query_type=data.get('query_type')  # NUEVO
+            category=data.get('category'),
+            tags=json.dumps(data.get('tags', [])),
+            chart_config=json.dumps(data.get('chart_config')) if data.get('chart_config') else None,
+            query_type=data.get('query_type'),
+            status='pending'  # NUEVO
         )
         session.add(feedback)
         session.commit()
         feedback_id = feedback.id
+        
+        # Preparar datos para validación
+        feedback_data = {
+            'original_query': data.get('original_query'),
+            'original_response': data.get('original_response'),
+            'corrected_response': data.get('corrected_response'),
+            'data_snapshot': data.get('data_snapshot', [])
+        }
+        
+        # VALIDAR CON CLAUDE
+        try:
+            validation_result = validate_feedback_with_claude(feedback_data, claude_handler)
+            
+            # Actualizar feedback con resultado
+            feedback.validation_verdict = validation_result['verdict']
+            feedback.validation_reasoning = validation_result['reasoning']
+            feedback.validation_date = datetime.now()
+            
+            if validation_result['verdict'] == 'approved':
+                feedback.status = 'auto_approved'
+            else:
+                feedback.status = 'auto_rejected'
+            
+            session.commit()
+            logger.info(f"✅ Feedback {feedback_id} validado: {validation_result['verdict']}")
+            
+        except Exception as validation_error:
+            logger.error(f"❌ Error en validación: {validation_error}")
+            
+            feedback.status = 'auto_rejected'
+            feedback.validation_verdict = 'rejected'
+            feedback.validation_reasoning = f'Error en validación: {str(validation_error)}'
+            feedback.validation_date = datetime.now()
+            session.commit()
+            
+            validation_result = {
+                'verdict': 'rejected',
+                'trainer_message': 'Hubo un error técnico al validar tu corrección.',
+                'reasoning': str(validation_error)
+            }
+        
         session.close()
         
-        # Log después de cerrar sesión
-        log_audit(user_id, username, 'FEEDBACK', details=f"Feedback ID: {feedback_id}, Categoría: {data.get('category')}", ip_address=request.remote_addr)
+        log_audit(user_id, username, 'FEEDBACK', 
+                 details=f"Feedback ID: {feedback_id}, Verdict: {validation_result['verdict']}", 
+                 ip_address=request.remote_addr)
         
-        logger.info(f"✅ Trainer feedback guardado: {feedback_id}, categoría: {data.get('category')}")
+        # Formatear respuesta para el trainer
+        formatted_response = format_validation_for_trainer(validation_result)
+        formatted_response['feedback_id'] = feedback_id  # AGREGAR feedback_id
         
-        return jsonify({'success': True, 'feedback_id': feedback_id}), 201
+        return jsonify({
+            'success': True,
+            'feedback_id': feedback_id,
+            'validation': formatted_response
+        }), 201
         
     except Exception as e:
         logger.error(f"Error en trainer feedback: {e}")
@@ -751,6 +880,150 @@ def submit_trainer_feedback(user_id):
             session.rollback()
             session.close()
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/trainer/feedback/<int:feedback_id>/escalate', methods=['POST'])
+@token_required
+def escalate_feedback(user_id, feedback_id):
+    """Escalar feedback cuando trainer no está de acuerdo con Claude"""
+    session = None
+    try:
+        session = Session()
+        user = session.query(User).filter_by(id=user_id).first()
+        username = user.username if user else 'unknown'
+        
+        if not user or user.role != 'trainer':
+            session.close()
+            return jsonify({'error': 'Solo trainers pueden escalar feedback'}), 403
+        
+        # Buscar feedback
+        feedback = session.query(TrainerFeedback).filter_by(id=feedback_id).first()
+        
+        if not feedback:
+            session.close()
+            return jsonify({'error': 'Feedback no encontrado'}), 404
+        
+        # Verificar que esté rechazado
+        if feedback.status != 'auto_rejected':
+            session.close()
+            return jsonify({'error': 'Solo se pueden escalar correcciones rechazadas'}), 400
+        
+        data = request.json
+        escalation_reason = data.get('reason', '')
+        
+        # Actualizar feedback
+        feedback.status = 'escalated'
+        feedback.escalation_reason = escalation_reason
+        feedback.escalation_date = datetime.now()
+        session.commit()
+        
+        # Enviar email al administrador
+        try:
+            send_escalation_email(feedback, user, escalation_reason)
+            logger.info(f"📧 Email de escalación enviado para feedback {feedback_id}")
+        except Exception as email_error:
+            logger.error(f"❌ Error enviando email: {email_error}")
+        
+        session.close()
+        
+        log_audit(user_id, username, 'ESCALATE_FEEDBACK', 
+                 details=f"Feedback ID: {feedback_id}", 
+                 ip_address=request.remote_addr)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Reporte enviado al administrador. Serás notificado cuando se resuelva.'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error escalando feedback: {e}")
+        if session:
+            session.rollback()
+            session.close()
+        return jsonify({'error': str(e)}), 500
+
+
+def send_escalation_email(feedback, trainer_user, escalation_reason):
+    """Envía email al administrador cuando un trainer escala un feedback"""
+    
+    # Configuración SMTP
+    smtp_server = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+    smtp_port = int(os.getenv('SMTP_PORT', '587'))
+    smtp_user = os.getenv('SMTP_USER')
+    smtp_pass = os.getenv('SMTP_PASS')
+    admin_email = os.getenv('ADMIN_EMAIL', 'danilo.sosa@texo.com.py')
+    
+    if not smtp_user or not smtp_pass:
+        logger.warning("SMTP no configurado, email no enviado")
+        return
+    
+    # Formatear datos
+    data_preview = "N/A"
+    try:
+        if feedback.chart_data:
+            data_json = json.loads(feedback.chart_data)
+            data_preview = json.dumps(data_json[:3], indent=2, ensure_ascii=False)
+    except:
+        pass
+    
+    # Construir email
+    subject = f"🚨 JARVIS - Trainer reporta desacuerdo (Feedback #{feedback.id})"
+    
+    body = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DESACUERDO REPORTADO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Trainer: {trainer_user.username}
+Fecha: {datetime.now().strftime('%d/%b/%Y %H:%M')}
+
+QUERY ORIGINAL:
+"{feedback.original_query}"
+
+RESPUESTA ORIGINAL DE CLAUDE:
+{feedback.original_response}
+
+CORRECCIÓN PROPUESTA POR TRAINER:
+{feedback.corrected_response}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VALIDACIÓN DE CLAUDE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Verdict: {feedback.validation_verdict.upper()}
+
+Razón:
+{feedback.validation_reasoning}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+COMENTARIO DEL TRAINER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{escalation_reason}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DATOS (primeros registros)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{data_preview}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ID del Feedback: {feedback.id}
+"""
+    
+    # Enviar
+    msg = MIMEMultipart()
+    msg['From'] = smtp_user
+    msg['To'] = admin_email
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain', 'utf-8'))
+    
+    with smtplib.SMTP(smtp_server, smtp_port) as server:
+        server.starttls()
+        server.login(smtp_user, smtp_pass)
+        server.send_message(msg)
+    
+    logger.info(f"✅ Email enviado a {admin_email}")
 
 @app.route('/api/trainer/feedback', methods=['GET'])
 @token_required
