@@ -29,6 +29,12 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from validate_feedback import validate_feedback_with_claude, format_validation_for_trainer
+from busqueda_flexible import (
+    get_facturacion_cliente,
+    get_inversion_medios_cliente,
+    get_ranking_dnit_cliente,
+    get_perfil_adlens_cliente
+)
 
 
 # SQLAlchemy
@@ -274,6 +280,50 @@ def find_similar_feedback(user_query, category=None):
         return None
 
 # ==================== QUERIES A LA BD ====================
+def format_data_for_claude(rows, query_type):
+    """
+    Formatea datos cruzados para que Claude los entienda mejor
+    """
+    if not rows:
+        return rows
+    
+    # Si tiene datos de inversión o ranking, formatear especialmente
+    if query_type == "facturacion" and isinstance(rows[0], dict):
+        # Datos cruzados, formatear para Claude
+        formatted = []
+        for row in rows:
+            item = {
+                'cliente': row.get('cliente', ''),
+                'facturacion': row.get('facturacion_total', 0), 
+                'promedio_mensual': row.get('promedio_mensual', 0),
+                'market_share': row.get('market_share', 0)
+            }
+            
+            # Agregar inversión si existe
+            if 'inversion_medios' in row:
+                inv = row['inversion_medios']
+                item['inversion_detalle'] = inv
+                item['inversion_total_usd'] = sum(i.get('inversion_usd', 0) for i in inv)
+            else:
+                # ✅ Valores por defecto cuando no hay inversión
+                item['inversion_detalle'] = []
+                item['inversion_total_usd'] = 0
+            
+            # Agregar ranking si existe
+            if 'ranking_dnit' in row:
+                item['ranking'] = row['ranking_dnit'].get('ranking')
+                item['aporte_dnit'] = row['ranking_dnit'].get('aporte_gs')
+            else:
+                # ✅ Valores por defecto cuando no hay ranking
+                item['ranking'] = None
+                item['aporte_dnit'] = 0
+            
+            formatted.append(item)
+        
+        return formatted
+    
+    return rows
+
 
 def generate_response(query_type, rows, user_query):
     """
@@ -367,40 +417,78 @@ def get_top_clientes_enriched(query):
         return []
 
 def get_facturacion_enriched(query):
-    """Facturación de un cliente específico"""
-    query_limpio = query.replace('?', '').replace('!', '').replace(',', '')
-    palabras = query_limpio.split()
-    cliente = " ".join([p for p in palabras if p.isupper()])
+    """
+    Facturación de un cliente con búsqueda flexible
+    Detecta si pide solo facturación o facturación + inversión
+    """
+    query_limpio = query.replace('?', '').replace('!', '').replace(',', '').lower()
     
-    if not cliente:
+    # Palabras comunes a ignorar
+    stopwords = ['cuanto', 'cuánto', 'facturo', 'facturó', 'facturacion', 'facturación', 
+                 'de', 'la', 'el', 'en', 'y', 'o', 'para', 'con', 'a', 'un', 'una',
+                 'invirtio', 'invirti', 'invertir', 'inversion']
+    
+    palabras = query_limpio.split()
+    cliente_palabras = [p for p in palabras if p not in stopwords and len(p) > 2]
+    
+    if not cliente_palabras:
         return []
     
+    # Extraer nombre del cliente
+    cliente = cliente_palabras[0] if len(cliente_palabras) == 1 else " ".join(cliente_palabras[:2])
+    
+    # Detectar qué datos necesita
+    pide_inversion = any(w in query_limpio for w in ['tv', 'radio', 'cable', 'inversion', 'invirtio', 'invertir', 'medios', 'publicidad', 'pauta'])
+    pide_ranking = any(w in query_limpio for w in ['ranking', 'dnit', 'posicion', 'puesto', 'aporte'])
+    
+    resultado = []
+    
     try:
-        with engine.connect() as conn:
-            stmt = text("""
-                SELECT 
-                    d.nombre_canonico,
-                    SUM(f.facturacion)::float as facturacion,
-                    AVG(f.facturacion)::float as promedio_mensual,
-                    (SUM(f.facturacion) / (SELECT SUM(facturacion) FROM fact_facturacion) * 100)::float as market_share
-                FROM dim_anunciante d
-                LEFT JOIN fact_facturacion f ON d.anunciante_id = f.anunciante_id AND f.facturacion > 0
-                WHERE UPPER(d.nombre_canonico) LIKE UPPER(:cliente)
-                GROUP BY d.anunciante_id, d.nombre_canonico
-            """)
-            rows = conn.execute(stmt, {"cliente": f"%{cliente}%"}).fetchall()
+        # 1. Siempre buscar facturación si la query lo indica
+        if any(w in query_limpio for w in ['facturo', 'facturacion', 'vendio', 'ventas', 'cuanto']):
+            facturacion = get_facturacion_cliente(cliente, engine)
             
-            result = []
-            for r in rows:
-                result.append({
-                    "cliente": r[0],
-                    "facturacion": float(r[1]) if r[1] else 0,
-                    "promedio_mensual": float(r[2]) if r[2] else 0,
-                    "market_share": float(r[3]) if r[3] else 0
-                })
-            return result
+            if facturacion:
+                # Agregar datos de facturación al resultado
+                for f in facturacion:
+                    resultado.append(f)
+        
+        # 2. Si pide inversión, buscar en medios
+        if pide_inversion:
+            # Detectar filtros
+            filtros = {}
+            if 'tv' in query_limpio:
+                filtros['medio'] = 'TV'
+            elif 'radio' in query_limpio:
+                filtros['medio'] = 'RADIO'
+            elif 'cable' in query_limpio:
+                filtros['medio'] = 'CABLE'
+            
+            inversion = get_inversion_medios_cliente(cliente, engine, filtros)
+            
+            if inversion:
+                # Agregar datos de inversión al resultado
+                if resultado:
+                    # Ya hay facturación, agregar inversión al mismo dict
+                    resultado[0]['inversion_medios'] = inversion
+                else:
+                    # Solo inversión, crear resultado
+                    resultado = [{
+                        'cliente': inversion[0]['cliente'],
+                        'inversion_medios': inversion
+                    }]
+        
+        # 3. ✅ CORREGIDO: Siempre buscar ranking DNIT cuando tenemos datos del cliente
+        if resultado:  # ✅ CORREGIDO: buscar automáticamente
+            ranking = get_ranking_dnit_cliente(cliente, engine)
+            
+            if ranking:
+                resultado[0]['ranking_dnit'] = ranking[0]
+        
+        return resultado
+        
     except Exception as e:
-        logger.error(f"Error Facturación: {e}")
+        logger.error(f"Error en get_facturacion_enriched: {e}")
         return []
 
 # ==================== ENDPOINTS ====================
@@ -669,9 +757,10 @@ def query(user_id):
             rows = get_top_clientes_enriched(user_query)
             logger.info(f"🔍 Detectado: ranking - rows: {len(rows)}")
         
-        elif any(w in query_lower for w in ["cuánto", "cuanto", "factur", "how much"]):
+        elif any(w in query_lower for w in ["cuánto", "cuanto", "factur", "how much", "invirti", "ranking", "dnit"]):
             query_type = "facturacion"
             rows = get_facturacion_enriched(user_query)
+            rows = format_data_for_claude(rows, query_type)  # ✅ Formatear datos cruzados
             logger.info(f"🔍 Detectado: facturacion - rows: {len(rows)}")
         
         else:
@@ -680,7 +769,7 @@ def query(user_id):
                 "response": "Consulta no reconocida. Prueba: 'Top 5 clientes', 'Gráfico de top 5', 'Cuánto facturó CERVEPAR?'"
             }), 200
         
-        # CONSTRUIR RESPUESTAS SEGÚN INTENCIÓN
+        # ✅ CONSTRUIR RESPUESTAS SEGÚN INTENCIÓN (LIMPIO)
         responses = []
         
         if intent == "table_only":
@@ -719,7 +808,7 @@ def query(user_id):
                 "query_type": query_type
             })
             
-            # Análisis de Claude
+            # ✅ Análisis de Claude (UNA SOLA VEZ)
             analysis_text = generate_response(query_type, rows, user_query)
             responses.append({
                 "type": "text",
@@ -729,17 +818,17 @@ def query(user_id):
             })
         
         elif intent == "chart_only":
-            # Solo gráfico con metadatos de Python
+            # Solo gráfico
             chart_config = build_chart_config(user_query, query_type, rows)
             responses.append({
                 "type": "chart",
                 "chart_config": chart_config,
                 "data": rows,
-                "query_type": query_type,
+                "query_type": query_type
             })
         
         else:  # text_only
-            # Solo análisis de Claude
+            # ✅ Solo análisis de Claude
             analysis_text = generate_response(query_type, rows, user_query)
             responses.append({
                 "type": "text",
@@ -748,27 +837,34 @@ def query(user_id):
                 "data": rows
             })
         
-        # Guardar en BD (solo el primer mensaje principal)
+        # ✅ GUARDAR EN BD (solo la primera respuesta para historial)
         try:
             session = Session()
-            main_response = responses[-1]  # Última respuesta (la más importante)
+            
+            # Validación mejorada
+            if responses and len(responses) > 0:
+                main_response = responses[0]
+            else:
+                main_response = {"type": "text", "content": "Sin respuesta"}
             
             conversation = Conversation(
                 user_id=user_id,
                 session_id=session_id,
                 query=user_query,
-                response=main_response.get('content', ''),
+                response=main_response.get("content", ""),
                 query_type=query_type,
-                chart_config=json.dumps(main_response.get('chart_config')) if main_response.get('chart_config') else None,
+                chart_config=json.dumps(main_response.get("chart_config")) if main_response.get("chart_config") else None,
                 chart_data=json.dumps(rows) if rows else None
             )
+            
             session.add(conversation)
             session.commit()
-            conv_id = conversation.id
-            logger.info(f"✅ Conversación guardada: {conv_id}")
             session.close()
-        except Exception as db_err:
-            logger.error(f"❌ Error guardando en BD: {db_err}")
+            
+            logger.info(f"✅ Conversación guardada: {conversation.id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error guardando en BD: {e}")
             if session:
                 session.rollback()
                 session.close()
@@ -779,8 +875,8 @@ def query(user_id):
         }), 200
         
     except Exception as e:
-        logger.error(f"Error: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        logger.error(f"Error en query: {e}")
+        return jsonify({"error": "Error procesando consulta"}), 500
 
 # ==================== TRAINER ENDPOINTS ====================
 @app.route('/api/trainer/feedback', methods=['POST'])

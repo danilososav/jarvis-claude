@@ -145,7 +145,7 @@ INSTRUCCIONES ESPECÍFICAS:
 Genera una respuesta analítica profesional completa que responda directamente a la pregunta del usuario."""
 
     def _format_data(self, data: List[Dict], query_type: str) -> str:
-        """Formatea los datos de forma estructurada"""
+        """Formatea los datos de forma estructurada - ✅ VERSIÓN CORREGIDA"""
         if not data:
             return "No hay datos disponibles"
         
@@ -160,22 +160,62 @@ Genera una respuesta analítica profesional completa que responda directamente a
         
         elif query_type == "facturacion":
             item = data[0] if data else {}
-            return f"""Cliente: {item.get('cliente', 'N/A')}
+            
+            # ✅ DATOS BASE
+            result = f"""Cliente: {item.get('cliente', 'N/A')}
 Facturación Total: {item.get('facturacion', 0):,.0f} Gs
 Promedio Mensual: {item.get('promedio_mensual', 0):,.0f} Gs
-Market Share: {item.get('market_share', 0):.2f}%
-Registros: {item.get('registros', 0)}"""
+Market Share: {item.get('market_share', 0):.2f}%"""
+            
+            # ✅ NUEVO: DATOS DE INVERSIÓN
+            if item.get('inversion_total_usd', 0) > 0:
+                result += f"\nInversión en TV: ${item.get('inversion_total_usd', 0):,.2f} USD"
+                
+                # Detalle por tipo de TV
+                if item.get('inversion_detalle'):
+                    result += "\nDetalle inversión:"
+                    for inv in item.get('inversion_detalle', []):
+                        result += f"\n  - {inv.get('medio', 'N/A')}: ${inv.get('inversion_usd', 0):,.2f} USD"
+            else:
+                result += "\nInversión en TV: Sin datos registrados"
+            
+            # ✅ NUEVO: RANKING DNIT
+            if item.get('ranking'):
+                result += f"\nRanking DNIT: #{item.get('ranking')}"
+                result += f"\nAporte DNIT: {item.get('aporte_dnit', 0):,.0f} Gs"
+            else:
+                result += "\nRanking DNIT: Sin datos disponibles"
+            
+            # ✅ NUEVO: PERÍODOS/REGISTROS (si existe)
+            if item.get('periodos'):
+                result += f"\nPeríodos activos: {item.get('periodos')}"
+            elif item.get('registros'):
+                result += f"\nRegistros: {item.get('registros')}"
+                
+            return result
         
         elif query_type == "comparacion":
             if len(data) >= 2:
                 c1, c2 = data[0], data[1]
-                return f"""CLIENTE A: {c1.get('cliente', 'N/A')}
+                result = f"""CLIENTE A: {c1.get('cliente', 'N/A')}
 Facturación: {c1.get('facturacion', 0):,.0f} Gs
-Market Share: {c1.get('market_share', 0):.2f}%
+Market Share: {c1.get('market_share', 0):.2f}%"""
+                
+                # ✅ NUEVO: Agregar inversión en comparaciones
+                if c1.get('inversion_total_usd', 0) > 0:
+                    result += f"\nInversión TV: ${c1.get('inversion_total_usd', 0):,.2f} USD"
+                    
+                result += f"""
 
 CLIENTE B: {c2.get('cliente', 'N/A')}
 Facturación: {c2.get('facturacion', 0):,.0f} Gs
 Market Share: {c2.get('market_share', 0):.2f}%"""
+                
+                # ✅ NUEVO: Agregar inversión en comparaciones
+                if c2.get('inversion_total_usd', 0) > 0:
+                    result += f"\nInversión TV: ${c2.get('inversion_total_usd', 0):,.2f} USD"
+                    
+                return result
         
         else:
             # Formato genérico para otros tipos
