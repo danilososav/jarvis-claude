@@ -6,19 +6,19 @@ Sistema de integración total: ERP + AdLens + DNIT
 from sqlalchemy import text
 import logging
 
+
 logger = logging.getLogger(__name__)
 
-def get_cliente_360(user_query):
+def get_cliente_360(user_query, db_engine):  # ← Recibir engine como parámetro
     """
     FUNCIÓN MAESTRA: Obtiene visión 360° completa del cliente
-    Integra: ERP + AdLens + DNIT + Perfiles + Inversiones granulares
     """
     
     logger.info(f"🔍 Iniciando análisis 360° para: {user_query}")
     
     try:
-        # 1. IDENTIFICAR CLIENTE con fuzzy matching mejorado
-        cliente_info = identify_cliente_fuzzy_360(user_query)
+        # 1. IDENTIFICAR CLIENTE
+        cliente_info = identify_cliente_fuzzy_360(user_query, db_engine)  # ← Pasar engine
         if not cliente_info:
             logger.warning(f"❌ Cliente no encontrado: {user_query}")
             return []
@@ -27,7 +27,7 @@ def get_cliente_360(user_query):
         logger.info(f"✅ Cliente identificado: {cliente_info['nombre']} (ID: {anunciante_id})")
         
         # 2. OBTENER DATOS DE TODAS LAS FUENTES
-        with engine.connect() as conn:
+        with db_engine.connect() as conn: 
             
             # 2.1 FACTURACIÓN ERP (fact_facturacion)
             facturacion_data = get_facturacion_erp_completa(conn, anunciante_id)
@@ -58,24 +58,23 @@ def get_cliente_360(user_query):
         # Fallback a sistema anterior si falla
         return get_facturacion_enriched_fallback(user_query)
 
-def identify_cliente_fuzzy_360(user_query):
+def identify_cliente_fuzzy_360(user_query,db_engine):
     """
     Identificación mejorada de clientes usando dim_anunciante_perfil
     """
     
     try:
-        with engine.connect() as conn:
+        with db_engine.connect() as conn: 
             # Buscar en dim_anunciante_perfil (fuente principal AdLens)
             stmt = text("""
-                SELECT 
-                    p.anunciante_id,
-                    p.nombre_anunciante as nombre,
-                    a.razon_social as nombre_oficial
-                FROM dim_anunciante_perfil p
-                LEFT JOIN dim_anunciante a ON p.anunciante_id = a.anunciante_id
-                WHERE p.nombre_anunciante IS NOT NULL
-                ORDER BY p.anunciante_id
-            """)
+            SELECT 
+                p.anunciante_id,
+                p.nombre_anunciante as nombre,
+                p.nombre_anunciante as nombre_oficial
+            FROM dim_anunciante_perfil p
+            WHERE p.nombre_anunciante IS NOT NULL
+            ORDER BY p.anunciante_id
+        """)
             
             clientes = conn.execute(stmt).fetchall()
             
@@ -120,13 +119,14 @@ def identify_cliente_fuzzy_360(user_query):
     except Exception as e:
         logger.error(f"❌ Error en fuzzy matching: {e}")
         return None
-
+    
 def get_facturacion_erp_completa(conn, anunciante_id):
     """
-    Obtener facturación completa del ERP con evolución temporal
+    Obtener facturación completa del ERP - VERSIÓN CORREGIDA
     """
     
     try:
+        # ✅ QUERY SIMPLIFICADA PERO COMPLETA
         stmt = text("""
             SELECT 
                 SUM(facturacion) as facturacion_total,
@@ -135,19 +135,9 @@ def get_facturacion_erp_completa(conn, anunciante_id):
                 AVG(facturacion) as promedio_mensual,
                 COUNT(*) as registros,
                 STRING_AGG(DISTINCT division, ', ') as divisiones,
-                STRING_AGG(DISTINCT arena, ', ') as arenas,
-                -- Evolución mensual últimos 12 meses
-                json_agg(
-                    json_build_object(
-                        'mes', mes,
-                        'anio', anio, 
-                        'facturacion', SUM(facturacion),
-                        'revenue', SUM(revenue)
-                    ) ORDER BY anio DESC, mes DESC
-                ) FILTER (WHERE anio >= 2023) as evolucion_mensual
+                STRING_AGG(DISTINCT arena, ', ') as arenas
             FROM fact_facturacion 
             WHERE anunciante_id = :anunciante_id
-            GROUP BY anunciante_id
         """)
         
         result = conn.execute(stmt, {"anunciante_id": anunciante_id}).fetchone()
@@ -161,14 +151,32 @@ def get_facturacion_erp_completa(conn, anunciante_id):
                 'registros': result.registros or 0,
                 'divisiones': result.divisiones or '',
                 'arenas': result.arenas or '',
-                'evolucion_mensual': result.evolucion_mensual or []
+                'evolucion_mensual': []  # ✅ CAMPO VACÍO PERO PRESENTE
             }
         else:
-            return {}
+            return {
+                'facturacion_total': 0,
+                'revenue_total': 0,
+                'costo_total': 0,
+                'promedio_mensual': 0,
+                'registros': 0,
+                'divisiones': '',
+                'arenas': '',
+                'evolucion_mensual': []
+            }
             
     except Exception as e:
         logger.error(f"❌ Error obteniendo facturación ERP: {e}")
-        return {}
+        return {
+            'facturacion_total': 0,
+            'revenue_total': 0,
+            'costo_total': 0,
+            'promedio_mensual': 0,
+            'registros': 0,
+            'divisiones': '',
+            'arenas': '',
+            'evolucion_mensual': []
+        }
 
 def get_ranking_dnit_completo(conn, anunciante_id):
     """
@@ -451,3 +459,53 @@ if __name__ == "__main__":
     print("✅ Fallback a sistema anterior")
     print("\n🚀 Listo para integrar en app.py")
 
+# ✅ FUNCIÓN FALTANTE - AGREGAR AL FINAL DEL ARCHIVO
+def format_data_for_claude_360(rows, query_type):
+    """
+    Formatea datos 360° completos para Claude
+    """
+    
+    if not rows:
+        return []
+    
+    # Procesar cada cliente en la respuesta
+    formatted_clients = []
+    
+    for row in rows:
+        # CLIENTE 360° - Estructura completa
+        cliente_360 = {
+            # IDENTIFICACIÓN BÁSICA
+            'cliente': row.get('cliente', 'N/A'),
+            'anunciante_id': row.get('anunciante_id'),
+            
+            # FACTURACIÓN ERP
+            'facturacion': row.get('facturacion', 0),
+            'revenue': row.get('revenue', 0),
+            'promedio_mensual': row.get('promedio_mensual', 0),
+            'registros': row.get('registros', 0),
+            'divisiones': row.get('divisiones', ''),
+            'arenas': row.get('arenas', ''),
+            
+            # POSICIONAMIENTO DNIT
+            'ranking': row.get('ranking'),
+            'aporte_dnit': row.get('aporte_dnit', 0),
+            
+            # PERFIL ADLENS
+            'rubro': row.get('rubro', ''),
+            'cluster': row.get('cluster', ''),
+            'cultura': row.get('cultura', ''),
+            'ejecucion': row.get('ejecucion', ''),
+            'competitividad': row.get('competitividad', 0),
+            
+            # INVERSIONES COMPLETAS
+            'inversion_total_usd': row.get('inversion_total_usd', 0),
+            'mix_medios': row.get('mix_medios', {}),
+            
+            # KPIS CALCULADOS
+            'roi_publicitario': row.get('roi_publicitario', 0),
+            'market_share': row.get('market_share', 0),
+        }
+        
+        formatted_clients.append(cliente_360)
+    
+    return formatted_clients

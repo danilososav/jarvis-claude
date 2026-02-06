@@ -36,6 +36,19 @@ from busqueda_flexible import (
     get_perfil_adlens_cliente
 )
 
+try:
+    from jarvis_360_integration import (
+        get_cliente_360,
+        identify_cliente_fuzzy_360,
+        format_data_for_claude_360
+    )
+    # ✅ NO IMPORTAR engine - ya está definido en este mismo archivo
+
+    print("✅ jarvis_360_integration importado correctamente")
+
+except ImportError as e:
+    print(f"❌ Error importando jarvis_360_integration: {e}")
+
 
 # SQLAlchemy
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
@@ -759,10 +772,10 @@ def query(user_id):
         
         elif any(w in query_lower for w in ["cuánto", "cuanto", "factur", "how much", "invirti", "ranking", "dnit"]):
             query_type = "facturacion"
-            rows = get_facturacion_enriched(user_query)
-            rows = format_data_for_claude(rows, query_type)  # ✅ Formatear datos cruzados
-            logger.info(f"🔍 Detectado: facturacion - rows: {len(rows)}")
-        
+            rows = get_cliente_360(user_query, engine) # ← NUEVO 360°
+            rows = format_data_for_claude_360(rows, query_type)  # ← NUEVO FORMATO
+            logger.info(f"🔍 Detectado: facturacion 360° - rows: {len(rows)}")
+            
         else:
             return jsonify({
                 "success": False, 
