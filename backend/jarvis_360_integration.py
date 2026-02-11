@@ -5,6 +5,8 @@ Sistema de integración total: ERP + AdLens + DNIT
 
 from sqlalchemy import text
 import logging
+import difflib
+import re
 
 
 logger = logging.getLogger(__name__)
@@ -18,7 +20,7 @@ def get_cliente_360(user_query, db_engine):  # ← Recibir engine como parámetr
     
     try:
         # 1. IDENTIFICAR CLIENTE
-        cliente_info = identify_cliente_fuzzy_360(user_query, db_engine)  # ← Pasar engine
+        cliente_info = identify_cliente_automatico_robusto(user_query, db_engine)
         if not cliente_info:
             logger.warning(f"❌ Cliente no encontrado: {user_query}")
             return []
@@ -100,7 +102,7 @@ def identify_cliente_fuzzy_360(user_query,db_engine):
                 if query_clean in nombre.lower() or query_clean in nombre_oficial.lower():
                     score += 0.3
                 
-                if score > best_score and score > 0.4:  # Threshold más bajo
+                if score > best_score and score > 0.7:  # Threshold más bajo
                     best_score = score
                     best_match = {
                         'anunciante_id': cliente.anunciante_id,
@@ -509,3 +511,243 @@ def format_data_for_claude_360(rows, query_type):
         formatted_clients.append(cliente_360)
     
     return formatted_clients
+
+def identify_cliente_automatico_robusto(user_query, db_engine):
+    """
+    Sistema robusto de identificación automática de clientes
+    Previene falsos positivos como cervepar → cerveza diosa
+    """
+    
+    logger.info(f"🔍 Identificación automática para: {user_query}")
+    
+    try:
+        with db_engine.connect() as conn:
+            # Obtener todos los clientes
+            stmt = text("""
+                SELECT 
+                    p.anunciante_id,
+                    p.nombre_anunciante as nombre,
+                    p.cluster,
+                    p.rubro_principal
+                FROM dim_anunciante_perfil p
+                WHERE p.nombre_anunciante IS NOT NULL
+                ORDER BY p.anunciante_id
+            """)
+            
+            clientes = conn.execute(stmt).fetchall()
+            
+            # PASO 1: Normalizar query
+            query_clean = normalizar_nombre_cliente(user_query)
+            logger.info(f"🔧 Query normalizado: '{query_clean}'")
+            
+            # PASO 2: COINCIDENCIA EXACTA (Prioridad Máxima)
+            exact_match = buscar_coincidencia_exacta(query_clean, clientes)
+            if exact_match:
+                logger.info(f"✅ COINCIDENCIA EXACTA: {exact_match['nombre']}")
+                return exact_match
+            
+            # PASO 3: ALIASES AUTOMÁTICOS
+            alias_match = buscar_por_aliases(query_clean, clientes)
+            if alias_match:
+                logger.info(f"✅ ALIAS encontrado: {alias_match['nombre']}")
+                return alias_match
+            
+            # PASO 4: FUZZY ESTRICTO (último recurso)
+            fuzzy_match = buscar_fuzzy_estricto(query_clean, clientes)
+            if fuzzy_match:
+                logger.info(f"✅ FUZZY ESTRICTO: {fuzzy_match['nombre']} (score: {fuzzy_match['score']:.2f})")
+                return fuzzy_match
+            
+            # No encontrado
+            logger.warning(f"❌ Cliente no identificado: {query_clean}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Error en identificación automática: {e}")
+        return None
+
+def normalizar_nombre_cliente(query):
+    """Normalizar y limpiar nombre del cliente"""
+    
+    stopwords = [
+        'cuanto', 'cuánto', 'facturo', 'facturó', 'invirtió', 'invirti', 
+        'datos', 'informacion', 'perfil', 'de', 'la', 'el', 'en', 'y', 
+        'tv', 'television', 'facturacion', 'ranking', 'cluster', 'cultura'
+    ]
+    
+    query_clean = query.lower().strip()
+    
+    # Remover stopwords
+    for word in stopwords:
+        query_clean = re.sub(rf'\b{word}\b', '', query_clean, flags=re.IGNORECASE)
+    
+    # Limpiar espacios y caracteres especiales
+    query_clean = re.sub(r'[^\w\s]', ' ', query_clean)
+    query_clean = re.sub(r'\s+', ' ', query_clean).strip()
+    
+    return query_clean
+
+def buscar_coincidencia_exacta(query_clean, clientes):
+    """Buscar coincidencia exacta o casi exacta"""
+    
+    for cliente in clientes:
+        nombre = cliente.nombre or ""
+        
+        # 1. Coincidencia exacta completa
+        if query_clean.lower() == nombre.lower():
+            return crear_resultado_cliente(cliente, 1.0, "exact_full")
+        
+        # 2. Coincidencia por palabras exactas
+        query_words = set(query_clean.lower().split())
+        nombre_words = set(nombre.lower().split())
+        
+        if query_words.issubset(nombre_words):
+            return crear_resultado_cliente(cliente, 0.95, "exact_words")
+        
+        # 3. Inicio exacto (ej: "unilever" → "UNILEVER DE PARAGUAY")
+        if nombre.lower().startswith(query_clean.lower()) and len(query_clean) >= 5:
+            return crear_resultado_cliente(cliente, 0.9, "exact_start")
+    
+    return None
+
+def buscar_por_aliases(query_clean, clientes):
+    """Buscar usando aliases conocidos automáticamente"""
+    
+    # Aliases automáticos para marcas conocidas
+    aliases_automaticos = {
+        # Cervezas
+        'cervepar': ['cervepar'],
+        'pilsen': ['pilsen'],
+        'brahma': ['brahma'],
+        
+        # Telecos
+        'tigo': ['tigo paraguay'],
+        'personal': ['personal', 'telecom personal'],
+        'telefonica': ['telefonica'],
+        
+        # Marcas globales
+        'unilever': ['unilever'],
+        'nestle': ['nestle', 'nestlé'],
+        'coca cola': ['coca cola', 'coca-cola'],
+        
+        # Bancos
+        'banco nacional': ['banco nacional'],
+        'banco continental': ['banco continental'],
+        
+        # Retail
+        'carrefour': ['carrefour'],
+        'superseis': ['superseis', 'super seis'],
+    }
+    
+    # Buscar en aliases
+    for alias_key, alias_variants in aliases_automaticos.items():
+        if any(variant in query_clean.lower() for variant in alias_variants):
+            # Buscar cliente que contenga esta palabra clave
+            for cliente in clientes:
+                nombre = cliente.nombre or ""
+                if alias_key in nombre.lower():
+                    return crear_resultado_cliente(cliente, 0.85, f"alias_{alias_key}")
+    
+    return None
+
+def buscar_fuzzy_estricto(query_clean, clientes):
+    """Fuzzy matching estricto con validaciones anti-falsos positivos"""
+    
+    best_match = None
+    best_score = 0
+    
+    for cliente in clientes:
+        nombre = cliente.nombre or ""
+        
+        # Calcular similarity
+        score = difflib.SequenceMatcher(None, query_clean.lower(), nombre.lower()).ratio()
+        
+        # VALIDACIONES ESTRICTAS
+        
+        # 1. Score mínimo mucho más alto
+        if score < 0.75:  # Era 0.4, ahora 0.75
+            continue
+        
+        # 2. Detectar falsos positivos obvios
+        if es_falso_positivo_obvio(query_clean, nombre):
+            logger.warning(f"⚠️ Falso positivo detectado: '{query_clean}' vs '{nombre}'")
+            continue
+        
+        # 3. Validar longitud similar
+        if abs(len(query_clean) - len(nombre)) > len(query_clean) * 0.7:
+            continue
+        
+        # 4. Primera palabra debe coincidir parcialmente
+        query_first = query_clean.split()[0] if query_clean.split() else ""
+        nombre_first = nombre.split()[0] if nombre.split() else ""
+        
+        if len(query_first) >= 4 and len(nombre_first) >= 4:
+            if query_first[:3].lower() != nombre_first[:3].lower():
+                continue
+        
+        if score > best_score:
+            best_score = score
+            best_match = crear_resultado_cliente(cliente, score, "fuzzy_strict")
+    
+    # Solo retornar si score es realmente alto
+    if best_match and best_score >= 0.8:
+        return best_match
+    
+    return None
+
+def es_falso_positivo_obvio(query, nombre):
+    """Detectar falsos positivos conocidos"""
+    
+    falsos_positivos = [
+        # Cervezas diferentes
+        (["cervepar"], ["cerveza diosa", "diosa"]),
+        (["brahma"], ["brahma garcia"]),
+        
+        # Telecos diferentes  
+        (["tigo"], ["tigo sports"]),
+        (["personal"], ["personal envios"]),
+        (["telefonica"], ["telefonica celular"]),
+        
+        # Evitar confusiones genéricas
+        (["nacional"], ["banco nacional de fomento"]),
+        (["central"], ["banco central", "mercado central"]),
+    ]
+    
+    query_lower = query.lower()
+    nombre_lower = nombre.lower()
+    
+    for query_patterns, nombre_patterns in falsos_positivos:
+        if any(pattern in query_lower for pattern in query_patterns):
+            if any(pattern in nombre_lower for pattern in nombre_patterns):
+                return True
+    
+    return False
+
+def crear_resultado_cliente(cliente, score, method):
+    """Crear objeto resultado estandarizado"""
+    
+    return {
+        'anunciante_id': cliente.anunciante_id,
+        'nombre': cliente.nombre,
+        'cluster': getattr(cliente, 'cluster', ''),
+        'rubro': getattr(cliente, 'rubro_principal', ''),
+        'score': score,
+        'method': method
+    }
+
+
+def es_consulta_de_cliente(user_query, db_engine):
+    """
+    Detectar si una query es sobre un cliente específico
+    """
+    try:
+        cliente_info = identify_cliente_automatico_robusto(user_query, db_engine)
+        
+        if cliente_info and cliente_info['score'] >= 0.8:
+            return cliente_info
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"❌ Error detectando cliente: {e}")
+        return None

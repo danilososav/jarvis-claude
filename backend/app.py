@@ -764,23 +764,35 @@ def query(user_id):
         # DETECCIÓN DE TIPO DE QUERY
         rows = []
         query_type = "generico"
-        
+
+        # 1. RANKINGS
         if any(w in query_lower for w in ["top", "ranking", "principal", "importante", "mayor", "más", "clientes"]):
             query_type = "ranking"
             rows = get_top_clientes_enriched(user_query)
             logger.info(f"🔍 Detectado: ranking - rows: {len(rows)}")
-        
-        elif any(w in query_lower for w in ["cuánto", "cuanto", "factur", "how much", "invirti", "ranking", "dnit"]):
+
+        # 2. FACTURACIÓN CON KEYWORDS
+        elif any(w in query_lower for w in ["cuánto", "cuanto", "factur", "how much", "invirti", "ranking", "dnit", "datos", "perfil", "informacion", "cluster", "cultura"]):
             query_type = "facturacion"
-            rows = get_cliente_360(user_query, engine) # ← NUEVO 360°
-            rows = format_data_for_claude_360(rows, query_type)  # ← NUEVO FORMATO
-            logger.info(f"🔍 Detectado: facturacion 360° - rows: {len(rows)}")
-            
+            rows = get_cliente_360(user_query, engine)
+            rows = format_data_for_claude_360(rows, query_type)
+            logger.info(f"🔍 Detectado: facturacion 360° con keywords - rows: {len(rows)}")
+
+        # 3. ✅ NUEVO: DETECCIÓN AUTOMÁTICA DE CLIENTES
         else:
-            return jsonify({
-                "success": False, 
-                "response": "Consulta no reconocida. Prueba: 'Top 5 clientes', 'Gráfico de top 5', 'Cuánto facturó CERVEPAR?'"
-            }), 200
+            from jarvis_360_integration import es_consulta_de_cliente
+            cliente_detectado = es_consulta_de_cliente(user_query, engine)
+            
+            if cliente_detectado:
+                query_type = "facturacion"
+                rows = get_cliente_360(user_query, engine)
+                rows = format_data_for_claude_360(rows, query_type)
+                logger.info(f"🔍 Detectado: cliente automático '{cliente_detectado['nombre']}' - rows: {len(rows)}")
+            else:
+                return jsonify({
+                    "success": False, 
+                    "response": "Consulta no reconocida. Prueba: 'Top 5 clientes', 'Cuánto facturó CERVEPAR?', o simplemente el nombre de un cliente como 'Unilever'"
+                }), 200
         
         # ✅ CONSTRUIR RESPUESTAS SEGÚN INTENCIÓN (LIMPIO)
         responses = []
@@ -851,9 +863,8 @@ def query(user_id):
             })
         
         # ✅ GUARDAR EN BD (solo la primera respuesta para historial)
-        try:
-            session = Session()
-            
+        # ✅ GUARDAR EN BD (solo la primera respuesta para historial)
+        try:            
             # Validación mejorada
             if responses and len(responses) > 0:
                 main_response = responses[0]
@@ -870,18 +881,22 @@ def query(user_id):
                 chart_data=json.dumps(rows) if rows else None
             )
             
-            session.add(conversation)
-            session.commit()
-            session.close()
+            # ✅ USAR MISMO PATRÓN QUE TRAINER FEEDBACK
+            bd_session = Session()
+            bd_session.add(conversation)
+            bd_session.commit()
+            conversation_id = conversation.id
+
+            logger.info(f"✅ Conversación guardada: {conversation_id}")
             
-            logger.info(f"✅ Conversación guardada: {conversation.id}")
+        except Exception as bd_error:
+            logger.error(f"❌ Error guardando en BD: {bd_error}")
+            if bd_session:
+                bd_session.rollback()
+        finally:
+            if bd_session:
+                bd_session.close()
             
-        except Exception as e:
-            logger.error(f"❌ Error guardando en BD: {e}")
-            if session:
-                session.rollback()
-                session.close()
-        
         return jsonify({
             "success": True,
             "responses": responses
