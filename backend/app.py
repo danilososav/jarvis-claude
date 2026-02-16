@@ -903,7 +903,7 @@ def query(user_id):
                 response=main_response.get("content", ""),
                 query_type=query_type,
                 chart_config=json.dumps(main_response.get("chart_config")) if main_response.get("chart_config") else None,
-                chart_data=json.dumps(rows, default=str) if rows else None
+                chart_data=json.dumps(rows, default=float) if rows else None
             )
             
             # ✅ USAR MISMO PATRÓN QUE TRAINER FEEDBACK
@@ -959,7 +959,7 @@ def submit_trainer_feedback(user_id):
             notes=data.get('notes', ''),
             category=data.get('category'),
             tags=json.dumps(data.get('tags', [])),
-            chart_config=json.dumps(data.get('chart_config')) if data.get('chart_config') else None,
+            chart_config=json.dumps(main_response.get("chart_config"), default=float) if main_response.get("chart_config") else None,
             query_type=data.get('query_type'),
             status='pending'  # NUEVO
         )
