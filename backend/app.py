@@ -16,6 +16,7 @@ from fuzzywuzzy import fuzz
 import pandas as pd
 import io
 import json
+from decimal import Decimal
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -95,6 +96,7 @@ CORS(app, resources={
         "allow_headers": ["Content-Type", "Authorization"]
     }
 })
+
 
 # ==================== DATABASE ====================
 
@@ -210,16 +212,34 @@ def token_required(f):
     def decorated(*args, **kwargs):
         token = request.headers.get('Authorization')
         if not token:
-            return jsonify({'error': 'Token requerido'}), 401
+            return safe_jsonify({'error': 'Token requerido'}), 401
         
         token = token.replace('Bearer ', '')
         user_id = verify_token(token)
         
         if not user_id:
-            return jsonify({'error': 'Token inválido'}), 401
+            return safe_jsonify({'error': 'Token inválido'}), 401
         
         return f(user_id, *args, **kwargs)
     return decorated
+
+# -------------------------------------------------------
+def safe_jsonify(data):
+    """
+    Versión segura de jsonify que maneja Decimals
+    """
+    def convert_decimals(obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        elif isinstance(obj, dict):
+            return {k: convert_decimals(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_decimals(v) for v in obj]
+        else:
+            return obj
+    
+    safe_data = convert_decimals(data)
+    return jsonify(safe_data)
 
 # ==================== FUZZY MATCHING ====================
 
@@ -512,9 +532,9 @@ def health():
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        return jsonify({"status": "✅ OK", "db": "connected"}), 200
+        return safe_jsonify({"status": "✅ OK", "db": "connected"}), 200
     except:
-        return jsonify({"status": "❌ ERROR", "db": "disconnected"}), 500
+        return safe_jsonify({"status": "❌ ERROR", "db": "disconnected"}), 500
 
 # ==================== AUTHENTICATION ENDPOINTS ====================
 
@@ -527,17 +547,17 @@ def register():
         password = data.get('password', '').strip()
         
         if not username or not password:
-            return jsonify({'error': 'Username y password requeridos'}), 400
+            return safe_jsonify({'error': 'Username y password requeridos'}), 400
         
         if len(password) < 6:
-            return jsonify({'error': 'Password mínimo 6 caracteres'}), 400
+            return safe_jsonify({'error': 'Password mínimo 6 caracteres'}), 400
         
         session = Session()
         
         existing = session.query(User).filter_by(username=username).first()
         if existing:
             session.close()
-            return jsonify({'error': 'Usuario ya existe'}), 409
+            return safe_jsonify({'error': 'Usuario ya existe'}), 409
         
         user = User(
             username=username,
@@ -553,7 +573,7 @@ def register():
         
         logger.info(f"✅ Usuario registrado: {username}")
         
-        return jsonify({
+        return safe_jsonify({
             'success': True,
             'user_id': user_id,
             'username': username,
@@ -563,7 +583,7 @@ def register():
         
     except Exception as e:
         logger.error(f"Error registrando usuario: {e}")
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
@@ -574,20 +594,20 @@ def login():
         password = data.get('password', '').strip()
         
         if not username or not password:
-            return jsonify({'error': 'Username y password requeridos'}), 400
+            return safe_jsonify({'error': 'Username y password requeridos'}), 400
         
         session = Session()
         user = session.query(User).filter_by(username=username).first()
         session.close()
         
         if not user or not check_password_hash(user.password_hash, password):
-            return jsonify({'error': 'Credenciales inválidas'}), 401
+            return safe_jsonify({'error': 'Credenciales inválidas'}), 401
         
         token = generate_token(user.id)
         
         logger.info(f"✅ Login: {username}")
         
-        return jsonify({
+        return safe_jsonify({
             'success': True,
             'user_id': user.id,
             'username': user.username,
@@ -598,7 +618,7 @@ def login():
         log_audit(user.id, user.username, 'LOGIN', ip_address=request.remote_addr)
     except Exception as e:
         logger.error(f"Error en login: {e}")
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 @app.route('/api/auth/verify', methods=['GET'])
 @token_required
@@ -610,9 +630,9 @@ def verify_user(user_id):
         session.close()
         
         if not user:
-            return jsonify({'error': 'Usuario no encontrado'}), 404
+            return safe_jsonify({'error': 'Usuario no encontrado'}), 404
         
-        return jsonify({
+        return safe_jsonify({
             'success': True,
             'user_id': user.id,
             'username': user.username,
@@ -620,7 +640,7 @@ def verify_user(user_id):
         }), 200
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 # ==================== QUERY ENDPOINTS ====================
 @app.route('/api/chat/history', methods=['GET'])
@@ -662,10 +682,10 @@ def get_chat_history(user_id):
             })
         
         session.close()
-        return jsonify({"success": True, "sessions": result}), 200
+        return safe_jsonify({"success": True, "sessions": result}), 200
     except Exception as e:
         logger.error(f"Error obteniendo historial: {e}")
-        return jsonify({"error": str(e)}), 500
+        return safe_jsonify({"error": str(e)}), 500
     
 @app.route('/api/chat/history/<int:conv_id>', methods=['DELETE'])
 @token_required
@@ -682,7 +702,7 @@ def delete_conversation(user_id, conv_id):
         
         if not conversation:
             session.close()
-            return jsonify({'error': 'Conversación no encontrada'}), 404
+            return safe_jsonify({'error': 'Conversación no encontrada'}), 404
         
         session.delete(conversation)
         session.commit()
@@ -690,14 +710,14 @@ def delete_conversation(user_id, conv_id):
         
         logger.info(f"✅ Conversación {conv_id} eliminada")
         
-        return jsonify({'success': True}), 200
+        return safe_jsonify({'success': True}), 200
         
     except Exception as e:
         logger.error(f"Error eliminando conversación: {e}")
         if session:
             session.rollback()
             session.close()
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 @app.route('/api/query', methods=['POST'])
 @token_required
@@ -715,7 +735,7 @@ def query(user_id):
     log_audit(user_id, username, 'QUERY', details=user_query[:100], ip_address=request.remote_addr)
 
     if not user_query:
-        return jsonify({"error": "Query vacío"}), 400
+        return safe_jsonify({"error": "Query vacío"}), 400
     
     try:
         query_lower = user_query.lower()
@@ -728,7 +748,7 @@ def query(user_id):
         similar_feedback = find_similar_feedback(user_query)
         if similar_feedback:
             response_text = similar_feedback.corrected_response
-            return jsonify({
+            return safe_jsonify({
                 "success": True,
                 "responses": [{
                     "type": "text",
@@ -749,7 +769,7 @@ def query(user_id):
                         rows = [dict(row._mapping) for row in result]
                         
                     response_text = f"Encontré {len(rows)} registros en la tabla {dt.table_name}"
-                    return jsonify({
+                    return safe_jsonify({
                         "success": True,
                         "responses": [{
                             "type": "text",
@@ -778,7 +798,12 @@ def query(user_id):
             rows = format_data_for_claude_360(rows, query_type)
             logger.info(f"🔍 Detectado: facturacion 360° con keywords - rows: {len(rows)}")
 
-        # 3. ✅ NUEVO: DETECCIÓN AUTOMÁTICA DE CLIENTES
+       # 3. ✅ CONSULTAS COMPLEJAS SIN CLAUDE
+        elif any(w in query_lower for w in ["comparar", "compare", "vs", "ranking", "clusters", "analisis", "estadisticas", "mercado", "completo", "datos completos"]):
+            from jarvis_360_integration import query_compleja_sin_claude_handler_puro
+            complex_result, status_code = query_compleja_sin_claude_handler_puro(user_query, engine)
+            return safe_jsonify(complex_result), status_code
+        
         else:
             from jarvis_360_integration import es_consulta_de_cliente
             cliente_detectado = es_consulta_de_cliente(user_query, engine)
@@ -789,7 +814,7 @@ def query(user_id):
                 rows = format_data_for_claude_360(rows, query_type)
                 logger.info(f"🔍 Detectado: cliente automático '{cliente_detectado['nombre']}' - rows: {len(rows)}")
             else:
-                return jsonify({
+                return safe_jsonify({
                     "success": False, 
                     "response": "Consulta no reconocida. Prueba: 'Top 5 clientes', 'Cuánto facturó CERVEPAR?', o simplemente el nombre de un cliente como 'Unilever'"
                 }), 200
@@ -878,7 +903,7 @@ def query(user_id):
                 response=main_response.get("content", ""),
                 query_type=query_type,
                 chart_config=json.dumps(main_response.get("chart_config")) if main_response.get("chart_config") else None,
-                chart_data=json.dumps(rows) if rows else None
+                chart_data=json.dumps(rows, default=str) if rows else None
             )
             
             # ✅ USAR MISMO PATRÓN QUE TRAINER FEEDBACK
@@ -897,14 +922,14 @@ def query(user_id):
             if bd_session:
                 bd_session.close()
             
-        return jsonify({
+        return safe_jsonify({
             "success": True,
             "responses": responses
         }), 200
         
     except Exception as e:
         logger.error(f"Error en query: {e}")
-        return jsonify({"error": "Error procesando consulta"}), 500
+        return safe_jsonify({"error": "Error procesando consulta"}), 500
 
 # ==================== TRAINER ENDPOINTS ====================
 @app.route('/api/trainer/feedback', methods=['POST'])
@@ -919,7 +944,7 @@ def submit_trainer_feedback(user_id):
         
         if not user or user.role != 'trainer':
             session.close()
-            return jsonify({'error': 'Solo trainers pueden enviar feedback'}), 403
+            return safe_jsonify({'error': 'Solo trainers pueden enviar feedback'}), 403
         
         data = request.json
         
@@ -992,7 +1017,7 @@ def submit_trainer_feedback(user_id):
         formatted_response = format_validation_for_trainer(validation_result)
         formatted_response['feedback_id'] = feedback_id  # AGREGAR feedback_id
         
-        return jsonify({
+        return safe_jsonify({
             'success': True,
             'feedback_id': feedback_id,
             'validation': formatted_response
@@ -1003,7 +1028,7 @@ def submit_trainer_feedback(user_id):
         if session:
             session.rollback()
             session.close()
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 @app.route('/api/trainer/feedback/<int:feedback_id>/escalate', methods=['POST'])
 @token_required
@@ -1017,19 +1042,19 @@ def escalate_feedback(user_id, feedback_id):
         
         if not user or user.role != 'trainer':
             session.close()
-            return jsonify({'error': 'Solo trainers pueden escalar feedback'}), 403
+            return safe_jsonify({'error': 'Solo trainers pueden escalar feedback'}), 403
         
         # Buscar feedback
         feedback = session.query(TrainerFeedback).filter_by(id=feedback_id).first()
         
         if not feedback:
             session.close()
-            return jsonify({'error': 'Feedback no encontrado'}), 404
+            return safe_jsonify({'error': 'Feedback no encontrado'}), 404
         
         # Verificar que esté rechazado
         if feedback.status != 'auto_rejected':
             session.close()
-            return jsonify({'error': 'Solo se pueden escalar correcciones rechazadas'}), 400
+            return safe_jsonify({'error': 'Solo se pueden escalar correcciones rechazadas'}), 400
         
         data = request.json
         escalation_reason = data.get('reason', '')
@@ -1053,7 +1078,7 @@ def escalate_feedback(user_id, feedback_id):
                  details=f"Feedback ID: {feedback_id}", 
                  ip_address=request.remote_addr)
         
-        return jsonify({
+        return safe_jsonify({
             'success': True,
             'message': 'Reporte enviado al administrador. Serás notificado cuando se resuelva.'
         }), 200
@@ -1063,7 +1088,7 @@ def escalate_feedback(user_id, feedback_id):
         if session:
             session.rollback()
             session.close()
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 
 def send_escalation_email(feedback, trainer_user, escalation_reason):
@@ -1159,7 +1184,7 @@ def get_trainer_feedback(user_id):
         
         if not user or user.role != 'trainer':
             session.close()
-            return jsonify({'error': 'Solo trainers pueden ver feedback'}), 403
+            return safe_jsonify({'error': 'Solo trainers pueden ver feedback'}), 403
         
         # Parámetro opcional para filtrar por categoría
         category = request.args.get('category')
@@ -1187,10 +1212,10 @@ def get_trainer_feedback(user_id):
         } for f in feedbacks]
         
         session.close()
-        return jsonify({'success': True, 'feedbacks': result}), 200
+        return safe_jsonify({'success': True, 'feedbacks': result}), 200
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 @app.route('/api/trainer/feedback/categories', methods=['GET'])
 @token_required
@@ -1202,7 +1227,7 @@ def get_feedback_categories(user_id):
         
         if not user or user.role != 'trainer':
             session.close()
-            return jsonify({'error': 'Solo trainers'}), 403
+            return safe_jsonify({'error': 'Solo trainers'}), 403
         
         categories = session.query(TrainerFeedback.category)\
             .filter(TrainerFeedback.category.isnot(None))\
@@ -1212,10 +1237,10 @@ def get_feedback_categories(user_id):
         categories = [c[0] for c in categories]
         session.close()
         
-        return jsonify({'success': True, 'categories': categories}), 200
+        return safe_jsonify({'success': True, 'categories': categories}), 200
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 @app.route('/api/trainer/upload', methods=['POST'])
 @token_required
@@ -1228,17 +1253,17 @@ def upload_excel(user_id):
         
         if not user or user.role != 'trainer':
             session.close()
-            return jsonify({'error': 'Solo trainers pueden subir archivos'}), 403
+            return safe_jsonify({'error': 'Solo trainers pueden subir archivos'}), 403
         
         if 'file' not in request.files:
-            return jsonify({'error': 'No file provided'}), 400
+            return safe_jsonify({'error': 'No file provided'}), 400
         
         file = request.files['file']
         if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
+            return safe_jsonify({'error': 'No file selected'}), 400
         
         if not file.filename.endswith('.xlsx'):
-            return jsonify({'error': 'Solo archivos .xlsx'}), 400
+            return safe_jsonify({'error': 'Solo archivos .xlsx'}), 400
         
         # Obtener nombre de tabla del archivo
         table_name = file.filename.replace('.xlsx', '').lower()
@@ -1247,7 +1272,7 @@ def upload_excel(user_id):
         
         # Validar nombre válido
         if not table_name.isidentifier():
-            return jsonify({'error': 'Nombre de archivo inválido'}), 400
+            return safe_jsonify({'error': 'Nombre de archivo inválido'}), 400
         
         # Leer Excel
         excel_file = io.BytesIO(file.read())
@@ -1267,7 +1292,7 @@ def upload_excel(user_id):
             # Tabla nueva: EXIGE 'id'
             if 'id' not in df.columns:
                 logger.error(f"❌ Falta columna 'id' en tabla nueva")
-                return jsonify({'error': 'Excel debe tener columna "id" para tabla nueva'}), 400
+                return safe_jsonify({'error': 'Excel debe tener columna "id" para tabla nueva'}), 400
         else:
             # Tabla existe: NO exige 'id'
             logger.info(f"✅ Tabla {table_name} existe, omitiendo validación de 'id'")
@@ -1358,7 +1383,7 @@ def upload_excel(user_id):
         # ENVIAR EMAIL EN AMBOS CASOS
         send_email_notification(table_name, list(df.columns), user.username, is_new_table=not table_exists)
         
-        return jsonify({
+        return safe_jsonify({
             'success': True,
             'table_name': table_name,
             'rows_inserted': rows_inserted,
@@ -1372,7 +1397,7 @@ def upload_excel(user_id):
         logger.error(f"Error uploadando Excel: {e}")
         if session:
             session.close()
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
     
 
 @app.route('/api/export/chart', methods=['POST'])
@@ -1385,7 +1410,7 @@ def export_chart(user_id):
         chart_data = data.get('chart_data')
         
         if not chart_type or not chart_data:
-            return jsonify({'error': 'Datos incompletos'}), 400
+            return safe_jsonify({'error': 'Datos incompletos'}), 400
         
         
         # Crear gráfico con Plotly
@@ -1430,7 +1455,7 @@ def export_chart(user_id):
         img_bytes = fig.to_image(format="png")
         img_base64 = base64.b64encode(img_bytes).decode()
         
-        return jsonify({
+        return safe_jsonify({
             'success': True,
             'image': img_base64,
             'filename': f'grafico_{chart_type}.png'
@@ -1438,7 +1463,7 @@ def export_chart(user_id):
         
     except Exception as e:
         logger.error(f"Error exportando gráfico: {e}")
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 @app.route('/api/export/pdf', methods=['POST'])
 @token_required
@@ -1538,7 +1563,7 @@ def export_pdf(user_id):
         pdf_buffer.seek(0)
         pdf_base64 = base64.b64encode(pdf_buffer.read()).decode()
         
-        return jsonify({
+        return safe_jsonify({
             'success': True,
             'pdf': pdf_base64,
             'filename': f'reporte_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pdf'
@@ -1546,7 +1571,7 @@ def export_pdf(user_id):
         
     except Exception as e:
         logger.error(f"Error exportando PDF: {e}")
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/export/excel', methods=['POST'])
@@ -1565,7 +1590,7 @@ def export_excel(user_id):
         filename = data.get('filename', 'datos')
         
         if not table_data:
-            return jsonify({'error': 'Sin datos para exportar'}), 400
+            return safe_jsonify({'error': 'Sin datos para exportar'}), 400
         
         # Crear Excel
         wb = Workbook()
@@ -1605,7 +1630,7 @@ def export_excel(user_id):
         excel_buffer.seek(0)
         excel_base64 = base64.b64encode(excel_buffer.read()).decode()
         
-        return jsonify({
+        return safe_jsonify({
             'success': True,
             'excel': excel_base64,
             'filename': f'{filename}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
@@ -1613,7 +1638,7 @@ def export_excel(user_id):
         
     except Exception as e:
         logger.error(f"Error exportando Excel: {e}")
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
     
 @app.route('/api/audit/logs', methods=['GET'])
 @token_required
@@ -1625,7 +1650,7 @@ def get_audit_logs(user_id):
         
         if not user or user.role != 'trainer':
             session.close()
-            return jsonify({'error': 'Solo trainers pueden ver auditoría'}), 403
+            return safe_jsonify({'error': 'Solo trainers pueden ver auditoría'}), 403
         
         logs = session.query(AuditLog)\
             .order_by(AuditLog.created_at.desc())\
@@ -1643,11 +1668,11 @@ def get_audit_logs(user_id):
         } for log in logs]
         
         session.close()
-        return jsonify({'success': True, 'logs': result}), 200
+        return safe_jsonify({'success': True, 'logs': result}), 200
         
     except Exception as e:
         logger.error(f"Error obteniendo logs: {e}")
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 @app.route('/api/trainer/tables', methods=['GET'])
 @token_required
@@ -1660,7 +1685,7 @@ def get_tables(user_id):
         
         if not user or user.role != 'trainer':
             session.close()
-            return jsonify({'error': 'Solo trainers'}), 403
+            return safe_jsonify({'error': 'Solo trainers'}), 403
         
         # Obtener solo tablas dinámicas creadas por usuarios (NO del sistema)
         tables_from_db = session.query(DynamicTable)\
@@ -1695,10 +1720,10 @@ def get_tables(user_id):
         } for t in valid_tables]
         
         session.close()
-        return jsonify({'success': True, 'tables': result}), 200
+        return safe_jsonify({'success': True, 'tables': result}), 200
     except Exception as e:
         logger.error(f"Error obteniendo tablas: {e}")
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/trainer/export-template', methods=['POST'])
@@ -1716,13 +1741,13 @@ def export_template(user_id):
         
         if not user or user.role != 'trainer':
             user_session.close()
-            return jsonify({'error': 'Solo trainers'}), 403
+            return safe_jsonify({'error': 'Solo trainers'}), 403
         
         data = request.json
         table_name = data.get('table_name')
         
         if not table_name:
-            return jsonify({'error': 'table_name requerido'}), 400
+            return safe_jsonify({'error': 'table_name requerido'}), 400
         
         # Obtener columnas de la tabla de PostgreSQL
         with engine.connect() as conn:
@@ -1767,7 +1792,7 @@ def export_template(user_id):
         excel_buffer.seek(0)
         excel_base64 = base64.b64encode(excel_buffer.read()).decode()
         
-        return jsonify({
+        return safe_jsonify({
             'success': True,
             'excel': excel_base64,
             'filename': f'{table_name}_template.xlsx'
@@ -1775,7 +1800,7 @@ def export_template(user_id):
         
     except Exception as e:
         logger.error(f"Error exportando template: {e}")
-        return jsonify({'error': str(e)}), 500
+        return safe_jsonify({'error': str(e)}), 500
 
 def send_email_notification(table_name, columns, username, is_new_table=True):
     """Enviar email de notificación de nueva tabla o datos agregados"""

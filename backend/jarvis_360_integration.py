@@ -7,58 +7,58 @@ from sqlalchemy import text
 import logging
 import difflib
 import re
-
+from sqlalchemy import text
+import json
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
-def get_cliente_360(user_query, db_engine):  # ← Recibir engine como parámetro
+# def decimal_default(obj):
+ #   if isinstance(obj, Decimal):
+ #       return float(obj)
+ #   raise TypeError
+
+def get_cliente_360(user_query, db_engine):
     """
-    FUNCIÓN MAESTRA: Obtiene visión 360° completa del cliente
+    Análisis 360° con identificación estratégica mejorada
     """
     
-    logger.info(f"🔍 Iniciando análisis 360° para: {user_query}")
+    # Detectar si es una consulta estratégica compleja
+    strategic_keywords = ['se nota', 'perfil', 'innovador', 'captura', 'escapando', 'departamento', 'agencia', 'crece más', 'refleja', 'coincide', 'típico', 'madurez', 'perdiendo oportunidades']
     
-    try:
-        # 1. IDENTIFICAR CLIENTE
+    if any(keyword in user_query.lower() for keyword in strategic_keywords):
+        # Usar análisis estratégico mejorado
+        return get_cliente_360_strategic(user_query, db_engine)
+    else:
+        # Usar análisis normal existente
+        logger.info(f"🔍 Iniciando análisis 360° normal para: {user_query}")
+        
         cliente_info = identify_cliente_automatico_robusto(user_query, db_engine)
+        
         if not cliente_info:
             logger.warning(f"❌ Cliente no encontrado: {user_query}")
             return []
         
-        anunciante_id = cliente_info['anunciante_id']
-        logger.info(f"✅ Cliente identificado: {cliente_info['nombre']} (ID: {anunciante_id})")
+        # Obtener datos ERP completos
+        datos_erp = get_facturacion_erp_completa(db_engine.connect(), cliente_info['anunciante_id'])
         
-        # 2. OBTENER DATOS DE TODAS LAS FUENTES
-        with db_engine.connect() as conn: 
-            
-            # 2.1 FACTURACIÓN ERP (fact_facturacion)
-            facturacion_data = get_facturacion_erp_completa(conn, anunciante_id)
-            
-            # 2.2 RANKING DNIT (dim_posicionamiento_dnit) 
-            ranking_data = get_ranking_dnit_completo(conn, anunciante_id)
-            
-            # 2.3 PERFIL ADLENS (dim_anunciante_perfil)
-            perfil_data = get_perfil_adlens_completo(conn, anunciante_id)
-            
-            # 2.4 INVERSIÓN GRANULAR OPCIONAL (fact_inversion_medios)
-            inversion_granular = get_inversion_granular_opcional(conn, anunciante_id)
-            
-            # 3. INTEGRAR TODO EN ESTRUCTURA 360°
-            cliente_360 = merge_all_sources_360(
-                cliente_info, 
-                facturacion_data, 
-                ranking_data, 
-                perfil_data, 
-                inversion_granular
-            )
-            
-            logger.info(f"✅ Análisis 360° completado para {cliente_info['nombre']}")
-            return [cliente_360]  # Lista para compatibilidad
-            
-    except Exception as e:
-        logger.error(f"❌ Error en análisis 360°: {e}")
-        # Fallback a sistema anterior si falla
-        return get_facturacion_enriched_fallback(user_query)
+        if not datos_erp or datos_erp['registros'] == 0:
+            logger.warning(f"❌ No hay datos ERP para {cliente_info['nombre']}")
+            return []
+        
+        # Enriquecer con datos AdLens y DNIT
+        datos_enriquecidos = enrich_with_adlens_and_dnit(datos_erp, cliente_info['anunciante_id'], db_engine)
+        
+        # Estructurar resultado
+        resultado = {
+            'cliente': cliente_info['nombre'],
+            'anunciante_id': cliente_info['anunciante_id'],
+            'metodo_identificacion': cliente_info.get('method', 'normal'),
+            'datos_completos': datos_enriquecidos
+        }
+        
+        logger.info(f"✅ Análisis 360° normal completado para {cliente_info['nombre']}")
+        return [resultado]
 
 def identify_cliente_fuzzy_360(user_query,db_engine):
     """
@@ -470,41 +470,32 @@ def format_data_for_claude_360(rows, query_type):
     if not rows:
         return []
     
-    # Procesar cada cliente en la respuesta
     formatted_clients = []
     
     for row in rows:
-        # CLIENTE 360° - Estructura completa
+        # Obtener datos_completos que contiene toda la info
+        datos = row.get('datos_completos', {})
+        
         cliente_360 = {
-            # IDENTIFICACIÓN BÁSICA
             'cliente': row.get('cliente', 'N/A'),
             'anunciante_id': row.get('anunciante_id'),
             
-            # FACTURACIÓN ERP
-            'facturacion': row.get('facturacion', 0),
-            'revenue': row.get('revenue', 0),
-            'promedio_mensual': row.get('promedio_mensual', 0),
-            'registros': row.get('registros', 0),
-            'divisiones': row.get('divisiones', ''),
-            'arenas': row.get('arenas', ''),
+            # FACTURACIÓN ERP - CORREGIDO
+            'facturacion': datos.get('facturacion_total', 0),
+            'revenue': datos.get('revenue_total', 0),
+            'promedio_mensual': datos.get('promedio_mensual', 0),
+            'registros': datos.get('registros', 0),
+            'divisiones': datos.get('divisiones', ''),
+            'arenas': datos.get('arenas', ''),
             
-            # POSICIONAMIENTO DNIT
-            'ranking': row.get('ranking'),
-            'aporte_dnit': row.get('aporte_dnit', 0),
+            # PERFIL ADLENS - CORREGIDO
+            'cluster': datos.get('perfil_adlens', {}).get('cluster', ''),
+            'competitividad': datos.get('perfil_adlens', {}).get('competitividad', 0),
             
-            # PERFIL ADLENS
-            'rubro': row.get('rubro', ''),
-            'cluster': row.get('cluster', ''),
-            'cultura': row.get('cultura', ''),
-            'ejecucion': row.get('ejecucion', ''),
-            'competitividad': row.get('competitividad', 0),
+            # RANKING DNIT - CORREGIDO
+            'ranking': datos.get('ranking_dnit', {}).get('ranking'),
+            'aporte_dnit': datos.get('ranking_dnit', {}).get('aporte_gs', 0),
             
-            # INVERSIONES COMPLETAS
-            'inversion_total_usd': row.get('inversion_total_usd', 0),
-            'mix_medios': row.get('mix_medios', {}),
-            
-            # KPIS CALCULADOS
-            'roi_publicitario': row.get('roi_publicitario', 0),
             'market_share': row.get('market_share', 0),
         }
         
@@ -619,6 +610,9 @@ def buscar_por_aliases(query_clean, clientes):
         'cervepar': ['cervepar'],
         'pilsen': ['pilsen'],
         'brahma': ['brahma'],
+        'telecel': ['telecel'],
+        'banco familiar': ['banco familiar'],
+        'distribuidora del paraguay': ['distribuidora del paraguay', 'distribuidora paraguay'],
         
         # Telecos
         'tigo': ['tigo paraguay'],
@@ -751,3 +745,967 @@ def es_consulta_de_cliente(user_query, db_engine):
     except Exception as e:
         logger.error(f"❌ Error detectando cliente: {e}")
         return None
+
+def get_consulta_compleja_sin_claude(user_query, db_engine):
+    """
+    Procesar consultas complejas que retornan datos puros sin análisis de Claude
+    """
+    
+    query_lower = user_query.lower()
+    
+    # DETECTAR TIPO DE CONSULTA COMPLEJA
+    if any(w in query_lower for w in ["comparar", "compare", "vs", "versus"]):
+        return consulta_comparacion_clientes(user_query, db_engine)
+    
+    elif any(w in query_lower for w in ["top", "ranking", "mejores", "mayores"]):
+        return consulta_ranking_avanzado(user_query, db_engine)
+    
+    elif any(w in query_lower for w in ["cluster", "clusters", "grupos"]):
+        return consulta_analisis_clusters(user_query, db_engine)
+    
+    elif any(w in query_lower for w in ["completo", "full", "todo", "todos"]):
+        return consulta_datos_completos(user_query, db_engine)
+    
+    elif any(w in query_lower for w in ["estadisticas", "stats", "resumen"]):
+        return consulta_estadisticas_mercado(user_query, db_engine)
+    
+    else:
+        return consulta_360_expandida(user_query, db_engine)
+
+def consulta_comparacion_clientes(user_query, db_engine):
+    """
+    Comparar múltiples clientes con todos sus datos
+    Ej: "comparar unilever vs nestle vs coca cola"
+    """
+    
+    logger.info(f"🔍 Consulta comparación: {user_query}")
+    
+    # Extraer nombres de clientes de la query
+    clientes_encontrados = []
+    posibles_clientes = ["unilever", "nestle", "coca cola", "cervepar", "tigo", "personal", "telefonica", "banco"]
+    
+    for cliente in posibles_clientes:
+        if cliente in user_query.lower():
+            info = identify_cliente_automatico_robusto(cliente, db_engine)
+            if info:
+                clientes_encontrados.append(info)
+    
+    if len(clientes_encontrados) < 2:
+        # Si no encuentra múltiples, buscar top 5 para comparar
+        clientes_encontrados = get_top_clientes_para_comparacion(db_engine)
+    
+    # Obtener datos completos de cada cliente
+    comparacion_data = []
+    for cliente in clientes_encontrados:
+        datos = get_datos_completos_cliente(cliente['anunciante_id'], db_engine)
+        comparacion_data.append(datos)
+    
+    return {
+        'tipo': 'comparacion',
+        'clientes_comparados': len(comparacion_data),
+        'datos': comparacion_data,
+        'campos_incluidos': [
+            'facturacion_total', 'market_share', 'ranking_dnit', 'cluster',
+            'inversiones_por_medio', 'perfil_estrategico', 'datos_organizacionales'
+        ]
+    }
+
+def consulta_ranking_avanzado(user_query, db_engine):
+    """
+    Rankings con múltiples criterios y filtros
+    Ej: "top 10 clientes por facturacion con cluster y medios"
+    """
+    
+    logger.info(f"🔍 Consulta ranking avanzado: {user_query}")
+    
+    try:
+        with db_engine.connect() as conn:
+            stmt = text("""
+                SELECT 
+                    f.anunciante_id,
+                    p.nombre_anunciante,
+                    SUM(f.facturacion) as facturacion_total,
+                    SUM(f.revenue) as revenue_total,
+                    COUNT(*) as registros,
+                    p.cluster,
+                    p.cultura,
+                    p.competitividad,
+                    p.puntaje_total,
+                    CAST(p.inversion_en_tv_abierta_2024_en_miles_usd AS FLOAT) as inv_tv,
+                    CAST(p.inversion_en_radio_2024_en_miles_usd AS FLOAT) as inv_radio,
+                    CAST(p.inversion_en_cable_2024_en_miles_usd AS FLOAT) as inv_cable,
+                    d.ranking as ranking_dnit,
+                    d.aporte_gs
+                FROM fact_facturacion f
+                JOIN dim_anunciante_perfil p ON f.anunciante_id = p.anunciante_id
+                LEFT JOIN dim_posicionamiento_dnit d ON f.anunciante_id = d.anunciante_id
+                GROUP BY f.anunciante_id, p.nombre_anunciante, p.cluster, p.cultura, 
+                         p.competitividad, p.puntaje_total, p.inversion_en_tv_abierta_2024_en_miles_usd,
+                         p.inversion_en_radio_2024_en_miles_usd, p.inversion_en_cable_2024_en_miles_usd,
+                         d.ranking, d.aporte_gs
+                ORDER BY facturacion_total DESC
+                LIMIT 15
+            """)
+            
+            results = conn.execute(stmt).fetchall()
+            
+            ranking_data = []
+            total_mercado = sum(row.facturacion_total for row in results)
+            
+            for i, row in enumerate(results, 1):
+                market_share = (row.facturacion_total / total_mercado * 100) if total_mercado > 0 else 0
+                
+                ranking_data.append({
+                    'posicion': i,
+                    'anunciante_id': row.anunciante_id,
+                    'nombre': row.nombre_anunciante,
+                    'facturacion_total': float(row.facturacion_total),
+                    'revenue_total': float(row.revenue_total),
+                    'market_share': round(market_share, 2),
+                    'registros': row.registros,
+                    'cluster': row.cluster,
+                    'cultura': row.cultura,
+                    'competitividad': row.competitividad,
+                    'puntaje_total': row.puntaje_total,
+                    'inversiones': {
+                        'tv_abierta': float(row.inv_tv or 0),
+                        'radio': float(row.inv_radio or 0),
+                        'cable': float(row.inv_cable or 0)
+                    },
+                    'ranking_dnit': row.ranking_dnit,
+                    'aporte_dnit': float(row.aporte_gs or 0)
+                })
+            
+            return {
+                'tipo': 'ranking_avanzado',
+                'total_clientes': len(ranking_data),
+                'mercado_total': float(total_mercado),
+                'datos': ranking_data
+            }
+    
+    except Exception as e:
+        logger.error(f"❌ Error ranking avanzado: {e}")
+        return {'error': str(e)}
+
+def consulta_analisis_clusters(user_query, db_engine):
+    """
+    Análisis por clusters empresariales - VERSIÓN CORREGIDA
+    Ej: "analisis por clusters con inversiones"
+    """
+    
+    logger.info(f"🔍 Análisis clusters: {user_query}")
+    
+    try:
+        with db_engine.connect() as conn:
+            stmt = text("""
+                SELECT 
+                    p.cluster,
+                    COUNT(*) as total_empresas,
+                    COUNT(f.anunciante_id) as empresas_con_facturacion,
+                    SUM(f.facturacion) as facturacion_cluster,
+                    AVG(f.facturacion) as promedio_facturacion,
+                    AVG(
+                        CASE 
+                            WHEN p.competitividad = '-' OR p.competitividad IS NULL OR p.competitividad = '' THEN NULL
+                            ELSE CAST(p.competitividad AS FLOAT)
+                        END
+                    ) as competitividad_promedio,
+                    AVG(
+                        CASE 
+                            WHEN p.puntaje_total = '-' OR p.puntaje_total IS NULL OR p.puntaje_total = '' THEN NULL
+                            ELSE CAST(p.puntaje_total AS FLOAT)
+                        END
+                    ) as puntaje_promedio,
+                    SUM(
+                        CASE 
+                            WHEN p.inversion_en_tv_abierta_2024_en_miles_usd = '-' OR p.inversion_en_tv_abierta_2024_en_miles_usd IS NULL OR p.inversion_en_tv_abierta_2024_en_miles_usd = '' THEN 0
+                            ELSE CAST(p.inversion_en_tv_abierta_2024_en_miles_usd AS FLOAT)
+                        END
+                    ) as inversion_tv_total,
+                    SUM(
+                        CASE 
+                            WHEN p.inversion_en_radio_2024_en_miles_usd = '-' OR p.inversion_en_radio_2024_en_miles_usd IS NULL OR p.inversion_en_radio_2024_en_miles_usd = '' THEN 0
+                            ELSE CAST(p.inversion_en_radio_2024_en_miles_usd AS FLOAT)
+                        END
+                    ) as inversion_radio_total,
+                    SUM(
+                        CASE 
+                            WHEN p.inversion_en_cable_2024_en_miles_usd = '-' OR p.inversion_en_cable_2024_en_miles_usd IS NULL OR p.inversion_en_cable_2024_en_miles_usd = '' THEN 0
+                            ELSE CAST(p.inversion_en_cable_2024_en_miles_usd AS FLOAT)
+                        END
+                    ) as inversion_cable_total
+                FROM dim_anunciante_perfil p
+                LEFT JOIN fact_facturacion f ON p.anunciante_id = f.anunciante_id
+                WHERE p.cluster IS NOT NULL AND p.cluster != ''
+                GROUP BY p.cluster
+                ORDER BY facturacion_cluster DESC NULLS LAST
+            """)
+            
+            results = conn.execute(stmt).fetchall()
+            
+            clusters_data = []
+            for row in results:
+                clusters_data.append({
+                    'cluster': row.cluster,
+                    'total_empresas': row.total_empresas,
+                    'empresas_con_facturacion': row.empresas_con_facturacion,
+                    'facturacion_total': float(row.facturacion_cluster or 0),
+                    'promedio_facturacion': float(row.promedio_facturacion or 0),
+                    'competitividad_promedio': round(float(row.competitividad_promedio or 0), 2),
+                    'puntaje_promedio': round(float(row.puntaje_promedio or 0), 1),
+                    'inversiones_totales': {
+                        'tv_abierta': float(row.inversion_tv_total or 0),
+                        'radio': float(row.inversion_radio_total or 0),
+                        'cable': float(row.inversion_cable_total or 0)
+                    }
+                })
+            
+            return {
+                'tipo': 'analisis_clusters',
+                'total_clusters': len(clusters_data),
+                'datos': clusters_data
+            }
+    
+    except Exception as e:
+        logger.error(f"❌ Error análisis clusters: {e}")
+        return {'error': str(e)}
+    
+def consulta_datos_completos(user_query, db_engine):
+    """
+    Datos completos de todos los campos disponibles
+    Ej: "datos completos de unilever" o "todo sobre nestle"
+    """
+    
+    logger.info(f"🔍 Datos completos: {user_query}")
+    
+    # Identificar cliente
+    cliente_info = identify_cliente_automatico_robusto(user_query, db_engine)
+    if not cliente_info:
+        return {'error': 'Cliente no identificado'}
+    
+    datos = get_datos_completos_cliente(cliente_info['anunciante_id'], db_engine)
+    
+    return {
+        'tipo': 'datos_completos',
+        'cliente': cliente_info['nombre'],
+        'anunciante_id': cliente_info['anunciante_id'],
+        'datos': datos
+    }
+
+def consulta_estadisticas_mercado(user_query, db_engine):
+    """
+    Estadísticas generales del mercado
+    Ej: "estadisticas del mercado publicitario"
+    """
+    
+    logger.info(f"🔍 Estadísticas mercado: {user_query}")
+    
+    try:
+        with db_engine.connect() as conn:
+            # Estadísticas generales
+            stmt = text("""
+                SELECT 
+                    COUNT(DISTINCT f.anunciante_id) as total_clientes_facturacion,
+                    COUNT(DISTINCT p.anunciante_id) as total_anunciantes_mercado,
+                    SUM(f.facturacion) as mercado_total_facturacion,
+                    SUM(f.revenue) as mercado_total_revenue,
+                    AVG(f.facturacion) as promedio_facturacion,
+                    COUNT(f.*) as total_registros
+                FROM fact_facturacion f
+                FULL OUTER JOIN dim_anunciante_perfil p ON f.anunciante_id = p.anunciante_id
+            """)
+            
+            result = conn.execute(stmt).fetchone()
+            
+            # Top 5 sectores por facturación
+            stmt_sectores = text("""
+                SELECT 
+                    p.rubro_principal,
+                    COUNT(*) as empresas,
+                    SUM(f.facturacion) as facturacion_sector,
+                    AVG(CAST(p.competitividad AS FLOAT)) as competitividad_promedio
+                FROM fact_facturacion f
+                JOIN dim_anunciante_perfil p ON f.anunciante_id = p.anunciante_id
+                WHERE p.rubro_principal IS NOT NULL
+                GROUP BY p.rubro_principal
+                ORDER BY facturacion_sector DESC
+                LIMIT 5
+            """)
+            
+            sectores = conn.execute(stmt_sectores).fetchall()
+            
+            return {
+                'tipo': 'estadisticas_mercado',
+                'resumen_general': {
+                    'total_clientes_facturacion': result.total_clientes_facturacion,
+                    'total_anunciantes_mercado': result.total_anunciantes_mercado,
+                    'mercado_total_facturacion': float(result.mercado_total_facturacion or 0),
+                    'mercado_total_revenue': float(result.mercado_total_revenue or 0),
+                    'promedio_facturacion': float(result.promedio_facturacion or 0),
+                    'total_registros': result.total_registros
+                },
+                'top_sectores': [
+                    {
+                        'sector': row.rubro_principal,
+                        'empresas': row.empresas,
+                        'facturacion': float(row.facturacion_sector),
+                        'competitividad_promedio': round(float(row.competitividad_promedio or 0), 2)
+                    }
+                    for row in sectores
+                ]
+            }
+    
+    except Exception as e:
+        logger.error(f"❌ Error estadísticas: {e}")
+        return {'error': str(e)}
+
+def get_datos_completos_cliente(anunciante_id, db_engine):
+    """
+    Obtener TODOS los datos disponibles de un cliente
+    """
+    
+    try:
+        with db_engine.connect() as conn:
+            # Datos del perfil AdLens
+            stmt_perfil = text("""
+                SELECT 
+                    nombre_anunciante,
+                    rubro_principal,
+                    tamano_de_la_empresa_cantidad_de_empleados,
+                    cluster,
+                    tipo_de_cluster,
+                    cultura,
+                    ejecucion,
+                    estructura,
+                    competitividad,
+                    puntaje_total,
+                    CAST(inversion_en_tv_abierta_2024_en_miles_usd AS FLOAT) as inv_tv,
+                    CAST(inversion_en_radio_2024_en_miles_usd AS FLOAT) as inv_radio,
+                    CAST(inversion_en_cable_2024_en_miles_usd AS FLOAT) as inv_cable,
+                    CAST(inversion_en_revistas_2024_en_miles_usd AS FLOAT) as inv_revistas,
+                    CAST(inversion_en_diarios_2024_en_miles_usd AS FLOAT) as inv_diarios,
+                    CAST(inversion_en_pdv_2024_en_miles_usd AS FLOAT) as inv_pdv,
+                    central_de_medios,
+                    tiene_la_empresa_departamento_de_marketing,
+                    en_que_medios_invierte_la_empresa_principalmente,
+                    la_empresa_invierte_en_digital
+                FROM dim_anunciante_perfil
+                WHERE anunciante_id = :anunciante_id
+            """)
+            
+            perfil = conn.execute(stmt_perfil, {"anunciante_id": anunciante_id}).fetchone()
+            
+            # Datos de facturación
+            stmt_facturacion = text("""
+                SELECT 
+                    SUM(facturacion) as facturacion_total,
+                    SUM(revenue) as revenue_total,
+                    SUM(costo) as costo_total,
+                    COUNT(*) as registros,
+                    AVG(facturacion) as promedio_mensual,
+                    MIN(fecha_fact) as primera_fecha,
+                    MAX(fecha_fact) as ultima_fecha,
+                    STRING_AGG(DISTINCT division, ', ') as divisiones,
+                    STRING_AGG(DISTINCT arena, ', ') as arenas
+                FROM fact_facturacion
+                WHERE anunciante_id = :anunciante_id
+            """)
+            
+            facturacion = conn.execute(stmt_facturacion, {"anunciante_id": anunciante_id}).fetchone()
+            
+            # Datos DNIT
+            stmt_dnit = text("""
+                SELECT 
+                    ranking,
+                    aporte_gs,
+                    ingreso_estimado_gs,
+                    razon_social
+                FROM dim_posicionamiento_dnit
+                WHERE anunciante_id = :anunciante_id
+            """)
+            
+            dnit = conn.execute(stmt_dnit, {"anunciante_id": anunciante_id}).fetchone()
+            
+            # Compilar datos completos
+            datos_completos = {
+                'identificacion': {
+                    'anunciante_id': anunciante_id,
+                    'nombre': perfil.nombre_anunciante if perfil else None,
+                    'rubro': perfil.rubro_principal if perfil else None,
+                    'tamaño_empresa': perfil.tamano_de_la_empresa_cantidad_de_empleados if perfil else None
+                },
+                'perfil_estrategico': {
+                    'cluster': perfil.cluster if perfil else None,
+                    'tipo_cluster': perfil.tipo_de_cluster if perfil else None,
+                    'cultura': perfil.cultura if perfil else None,
+                    'ejecucion': perfil.ejecucion if perfil else None,
+                    'estructura': perfil.estructura if perfil else None,
+                    'competitividad': perfil.competitividad if perfil else None,
+                    'puntaje_total': perfil.puntaje_total if perfil else None
+                } if perfil else {},
+                'facturacion_erp': {
+                    'facturacion_total': float(facturacion.facturacion_total or 0),
+                    'revenue_total': float(facturacion.revenue_total or 0),
+                    'costo_total': float(facturacion.costo_total or 0),
+                    'registros': facturacion.registros if facturacion else 0,
+                    'promedio_mensual': float(facturacion.promedio_mensual or 0),
+                    'primera_fecha': str(facturacion.primera_fecha) if facturacion and facturacion.primera_fecha else None,
+                    'ultima_fecha': str(facturacion.ultima_fecha) if facturacion and facturacion.ultima_fecha else None,
+                    'divisiones': facturacion.divisiones if facturacion else '',
+                    'arenas': facturacion.arenas if facturacion else ''
+                } if facturacion else {},
+                'inversiones_medios': {
+                    'tv_abierta_usd': float(perfil.inv_tv or 0),
+                    'radio_usd': float(perfil.inv_radio or 0),
+                    'cable_usd': float(perfil.inv_cable or 0),
+                    'revistas_usd': float(perfil.inv_revistas or 0),
+                    'diarios_usd': float(perfil.inv_diarios or 0),
+                    'pdv_usd': float(perfil.inv_pdv or 0),
+                    'total_usd': float((perfil.inv_tv or 0) + (perfil.inv_radio or 0) + (perfil.inv_cable or 0) + 
+                                     (perfil.inv_revistas or 0) + (perfil.inv_diarios or 0) + (perfil.inv_pdv or 0))
+                } if perfil else {},
+                'datos_organizacionales': {
+                    'central_medios': perfil.central_de_medios if perfil else None,
+                    'depto_marketing': perfil.tiene_la_empresa_departamento_de_marketing if perfil else None,
+                    'medios_principales': perfil.en_que_medios_invierte_la_empresa_principalmente if perfil else None,
+                    'invierte_digital': perfil.la_empresa_invierte_en_digital if perfil else None
+                } if perfil else {},
+                'ranking_dnit': {
+                    'ranking': dnit.ranking if dnit else None,
+                    'aporte_gs': float(dnit.aporte_gs or 0) if dnit else 0,
+                    'ingreso_estimado_gs': float(dnit.ingreso_estimado_gs or 0) if dnit else 0,
+                    'razon_social': dnit.razon_social if dnit else None
+                } if dnit else {}
+            }
+            
+            return datos_completos
+            
+    except Exception as e:
+        logger.error(f"❌ Error datos completos: {e}")
+        return {'error': str(e)}
+
+def get_top_clientes_para_comparacion(db_engine, limit=5):
+    """
+    Obtener top clientes para comparación
+    """
+    try:
+        with db_engine.connect() as conn:
+            stmt = text("""
+                SELECT DISTINCT
+                    p.anunciante_id,
+                    p.nombre_anunciante as nombre
+                FROM dim_anunciante_perfil p
+                JOIN fact_facturacion f ON p.anunciante_id = f.anunciante_id
+                WHERE p.nombre_anunciante IS NOT NULL
+                ORDER BY p.anunciante_id
+                LIMIT :limit
+            """)
+            
+            results = conn.execute(stmt, {"limit": limit}).fetchall()
+            
+            return [
+                {
+                    'anunciante_id': row.anunciante_id,
+                    'nombre': row.nombre
+                }
+                for row in results
+            ]
+    
+    except Exception as e:
+        logger.error(f"❌ Error top clientes: {e}")
+        return []
+
+# FUNCIÓN PRINCIPAL PARA AGREGAR A APP.PY
+def query_compleja_sin_claude_handler(user_query, engine):
+    """
+    Handler principal para consultas complejas sin Claude
+    Retorna datos puros en JSON para análisis
+    """
+    
+    logger.info(f"🔍 Consulta compleja sin Claude: {user_query}")
+    
+    resultado = get_consulta_compleja_sin_claude(user_query, engine)
+    
+    return {
+        "success": True,
+        "responses": [{
+            "type": "data_analysis",
+            "content": f"Datos extraídos sin análisis de Claude: {resultado['tipo']}",
+            "data": resultado,
+            "query_type": "compleja_sin_claude"
+        }]
+    }
+
+def extract_client_from_strategic_query(user_query):
+    """
+    Extraer nombres de clientes de preguntas estratégicas complejas
+    """
+    
+    # Patrones para detectar nombres de empresas en preguntas complejas
+    patterns = [
+        # "Empresa X ¿algo?" 
+        r'^([A-Z][A-Z\s&\.]+?)\s*[¿\?]',
+        # "¿Empresa X algo?"
+        r'¿([A-Z][A-Z\s&\.]+?)\s+',
+        # "Che, Empresa X algo"  
+        r'[Cc]he,?\s+([A-Z][A-Z\s&\.]+?)\s+',
+        # Solo nombre al inicio
+        r'^([A-Z][A-Z\s&\.]{2,20}?)\s+'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, user_query.strip())
+        if match:
+            nombre_candidato = match.group(1).strip()
+            
+            # Filtrar palabras que no son nombres de empresas
+            exclude_words = ['QUE', 'COMO', 'DONDE', 'CUANDO', 'POR', 'PARA', 'CON', 'SIN', 'SOBRE']
+            if nombre_candidato.upper() not in exclude_words and len(nombre_candidato) >= 3:
+                return nombre_candidato
+    
+    return None
+
+def identify_cliente_strategic_enhanced(user_query, db_engine):
+    """
+    Identificación mejorada para consultas estratégicas
+    """
+    
+    logger.info(f"🔍 Identificación estratégica para: {user_query}")
+    
+    # 1. Intentar extracción de nombre de la query
+    nombre_candidato = extract_client_from_strategic_query(user_query)
+    
+    if nombre_candidato:
+        logger.info(f"🎯 Nombre candidato extraído: '{nombre_candidato}'")
+        
+        # 2. Usar sistema robusto para identificar
+        cliente_info = identify_cliente_automatico_robusto(nombre_candidato, db_engine)
+        
+        if cliente_info:
+            logger.info(f"✅ Cliente estratégico identificado: {cliente_info['nombre']}")
+            return cliente_info
+    
+    # 3. Fallback: usar sistema original
+    cliente_info = identify_cliente_automatico_robusto(user_query, db_engine)
+    
+    if cliente_info:
+        logger.info(f"✅ Cliente fallback identificado: {cliente_info['nombre']}")
+        return cliente_info
+    
+    logger.warning(f"❌ Cliente no identificado en consulta estratégica: {user_query}")
+    return None
+
+def get_analisis_estrategico_cliente(cliente_info, user_query, db_engine):
+    """
+    Generar análisis estratégico específico para un cliente
+    """
+    
+    anunciante_id = cliente_info['anunciante_id']
+    nombre_cliente = cliente_info['nombre']
+    
+    logger.info(f"🧠 Generando análisis estratégico para: {nombre_cliente}")
+    
+    try:
+        with db_engine.connect() as conn:
+            # Query completa para análisis estratégico
+            stmt = text("""
+                SELECT 
+                    -- Identificación
+                    p.nombre_anunciante,
+                    p.rubro_principal,
+                    p.tamano_de_la_empresa_cantidad_de_empleados,
+                    
+                    -- Perfil estratégico
+                    p.cluster,
+                    CAST(p.cultura AS FLOAT) as cultura,
+                    CAST(p.competitividad AS FLOAT) as competitividad,
+                    CAST(p.puntaje_total AS FLOAT) as puntaje_total,
+                    CAST(p.la_empresa_invierte_en_digital AS FLOAT) as digital_score,
+                    
+                    -- Inversiones publicitarias
+                    CAST(p.inversion_en_tv_abierta_2024_en_miles_usd AS FLOAT) as inversion_tv,
+                    CAST(p.inversion_en_radio_2024_en_miles_usd AS FLOAT) as inversion_radio,
+                    CAST(p.inversion_en_cable_2024_en_miles_usd AS FLOAT) as inversion_cable,
+                    
+                    -- Datos organizacionales
+                    p.central_de_medios,
+                    p.tiene_la_empresa_departamento_de_marketing,
+                    p.en_que_medios_invierte_la_empresa_principalmente,
+                    
+                    -- Facturación nuestra
+                    COALESCE(SUM(f.facturacion), 0) as facturacion_total,
+                    COALESCE(SUM(f.revenue), 0) as revenue_total,
+                    COUNT(f.*) as registros,
+                    STRING_AGG(DISTINCT f.division, ', ') as divisiones,
+                    STRING_AGG(DISTINCT f.arena, ', ') as arenas
+                    
+                FROM dim_anunciante_perfil p
+                LEFT JOIN fact_facturacion f ON p.anunciante_id = f.anunciante_id
+                WHERE p.anunciante_id = :anunciante_id
+                GROUP BY p.anunciante_id, p.nombre_anunciante, p.rubro_principal, 
+                         p.tamano_de_la_empresa_cantidad_de_empleados, p.cluster,
+                         p.cultura, p.competitividad, p.puntaje_total, p.la_empresa_invierte_en_digital,
+                         p.inversion_en_tv_abierta_2024_en_miles_usd, p.inversion_en_radio_2024_en_miles_usd,
+                         p.inversion_en_cable_2024_en_miles_usd, p.central_de_medios,
+                         p.tiene_la_empresa_departamento_de_marketing, p.en_que_medios_invierte_la_empresa_principalmente
+            """)
+            
+            result = conn.execute(stmt, {"anunciante_id": anunciante_id}).fetchone()
+            
+            if not result:
+                return {'error': f'No se encontraron datos para {nombre_cliente}'}
+            
+            # Compilar análisis estratégico
+            analisis = {
+                'cliente': result.nombre_anunciante,
+                'perfil': {
+                    'rubro': result.rubro_principal,
+                    'tamaño': result.tamano_de_la_empresa_cantidad_de_empleados,
+                    'cluster': result.cluster,
+                    'cultura': result.cultura,
+                    'competitividad': result.competitividad,
+                    'puntaje_total': result.puntaje_total,
+                    'digital_score': result.digital_score
+                },
+                'inversiones_mercado': {
+                    'tv_usd': result.inversion_tv or 0,
+                    'radio_usd': result.inversion_radio or 0,
+                    'cable_usd': result.inversion_cable or 0,
+                    'total_medios_usd': (result.inversion_tv or 0) + (result.inversion_radio or 0) + (result.inversion_cable or 0)
+                },
+                'estructura_organizacional': {
+                    'central_medios': result.central_de_medios,
+                    'depto_marketing': result.tiene_la_empresa_departamento_de_marketing,
+                    'medios_principales': result.en_que_medios_invierte_la_empresa_principalmente
+                },
+                'relacion_comercial': {
+                    'facturacion_total': float(result.facturacion_total),
+                    'revenue_total': float(result.revenue_total),
+                    'registros': result.registros,
+                    'divisiones': result.divisiones,
+                    'arenas': result.arenas,
+                    'es_cliente': result.registros > 0
+                }
+            }
+            
+            # Generar insights específicos basados en el tipo de pregunta
+            analisis['insights'] = generar_insights_especificos(analisis, user_query)
+            
+            return analisis
+    
+    except Exception as e:
+        logger.error(f"❌ Error análisis estratégico: {e}")
+        return {'error': str(e)}
+
+def generar_insights_especificos(analisis, user_query):
+    """
+    Generar insights específicos basados en el tipo de pregunta
+    """
+    
+    insights = []
+    query_lower = user_query.lower()
+    
+    # Análisis de innovación
+    if any(word in query_lower for word in ['innovador', 'innovacion', 'innovativa']):
+        digital_score = analisis['perfil']['digital_score'] or 0
+        competitividad = analisis['perfil']['competitividad'] or 0
+        arenas = analisis['relacion_comercial']['arenas'] or ''
+        
+        if digital_score >= 8:
+            insights.append("✅ Empresa altamente digital (score ≥8)")
+        elif digital_score >= 5:
+            insights.append("⚡ Empresa moderadamente digital")
+        else:
+            insights.append("❌ Empresa con bajo score digital")
+        
+        if competitividad >= 0.8:
+            insights.append("✅ Empresa altamente competitiva")
+        elif competitividad >= 0.5:
+            insights.append("⚡ Empresa moderadamente competitiva")
+        else:
+            insights.append("❌ Empresa con baja competitividad")
+        
+        if 'CREACION' in arenas.upper():
+            insights.append("✅ Recibe servicios de CREACIÓN (innovador)")
+        if 'BI' in arenas.upper():
+            insights.append("✅ Recibe servicios de BI (estratégico)")
+        if arenas and 'DISTRIBUCION' in arenas.upper() and 'CREACION' not in arenas.upper():
+            insights.append("⚠️ Solo recibe DISTRIBUCIÓN (tradicional)")
+    
+    # Análisis de captura de inversión
+    if any(word in query_lower for word in ['captura', 'inversion', 'escapando']):
+        inversion_total = analisis['inversiones_mercado']['total_medios_usd']
+        facturacion = analisis['relacion_comercial']['facturacion_total']
+        
+        if inversion_total > 0 and facturacion > 0:
+            # Convertir facturación a USD aproximado
+            facturacion_usd = facturacion / 7500
+            ratio = (facturacion_usd / inversion_total) * 100
+            
+            if ratio >= 25:
+                insights.append(f"✅ Alta captura: Representa {ratio:.1f}% de su inversión")
+            elif ratio >= 10:
+                insights.append(f"⚡ Captura moderada: {ratio:.1f}% de su inversión")
+            else:
+                insights.append(f"❌ Baja captura: Solo {ratio:.1f}% de su inversión")
+        elif inversion_total > 0:
+            insights.append("❌ Invierte en medios pero no factura con nosotros")
+        elif facturacion > 0:
+            insights.append("✅ Cliente activo sin inversión declarada en medios tradicionales")
+    
+    # Análisis de estructura
+    if any(word in query_lower for word in ['departamento', 'agencia', 'central']):
+        central = analisis['estructura_organizacional']['central_medios']
+        depto = analisis['estructura_organizacional']['depto_marketing']
+        
+        if depto == 'Si' and central:
+            insights.append(f"🏢 Estructura: Depto Marketing + Central {central}")
+        elif depto == 'Si':
+            insights.append("🏢 Tiene departamento de marketing propio")
+        elif central:
+            insights.append(f"🏢 Trabaja con central {central}")
+    
+    return insights
+
+# FUNCIÓN PRINCIPAL PARA INTEGRAR EN GET_CLIENTE_360
+def get_cliente_360_strategic(user_query, db_engine):
+    """
+    Versión mejorada de get_cliente_360 con análisis estratégico
+    """
+    
+    logger.info(f"🎯 Iniciando análisis estratégico 360° para: {user_query}")
+    
+    # 1. Identificación mejorada
+    cliente_info = identify_cliente_strategic_enhanced(user_query, db_engine)
+    
+    if not cliente_info:
+        logger.warning(f"❌ Cliente no encontrado: {user_query}")
+        return []
+    
+    # 2. Análisis estratégico completo
+    analisis_estrategico = get_analisis_estrategico_cliente(cliente_info, user_query, db_engine)
+    
+    if 'error' in analisis_estrategico:
+        logger.error(f"❌ Error en análisis: {analisis_estrategico['error']}")
+        return []
+    
+    # 3. Formatear para Claude
+    resultado = {
+        'tipo_analisis': 'estrategico',
+        'cliente': analisis_estrategico['cliente'],
+        'consulta_original': user_query,
+        'analisis_completo': analisis_estrategico
+    }
+    
+    logger.info(f"✅ Análisis estratégico completado para {cliente_info['nombre']}")
+    
+    return [resultado]
+
+def extract_client_from_strategic_query(user_query):
+    """
+    Extraer nombres de clientes de preguntas estratégicas complejas
+    """
+    
+    # Patrones para diferentes formatos de pregunta
+    patterns = [
+        # "Empresa X ¿algo?"
+        r'^([A-Z][A-Za-z\s&\.]+?)\s*[¿\?]',
+        # "Che, Empresa X algo"
+        r'[Cc]he,?\s+([A-Z][A-Za-z\s&\.]+?)\s+(?:tiene|dice|es|se|¿)',
+        # "Empresa X dice/tiene/es algo"
+        r'^([A-Z][A-Za-z\s&\.]+?)\s+(?:dice|tiene|es|se)\s+',
+        # Solo nombre al inicio seguido de palabra clave
+        r'^([A-Z][A-Za-z\s&\.]{3,25}?)\s+(?:datos|perfil|cluster|factur)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, user_query.strip())
+        if match:
+            nombre_candidato = match.group(1).strip()
+            
+            # Limpiar nombre candidato
+            nombre_candidato = re.sub(r'\s+', ' ', nombre_candidato)
+            
+            # Filtrar palabras que no son nombres de empresas
+            exclude_words = ['QUE', 'COMO', 'DONDE', 'CUANDO', 'POR', 'PARA', 'CON', 'SIN', 'SOBRE', 'ESTA', 'ESTAN']
+            
+            if (nombre_candidato.upper() not in exclude_words and 
+                len(nombre_candidato) >= 3 and 
+                len(nombre_candidato) <= 30):
+                
+                logger.info(f"🎯 Nombre candidato extraído: '{nombre_candidato}'")
+                return nombre_candidato
+    
+    return None
+
+def get_cliente_360_strategic(user_query, db_engine):
+    """
+    Análisis estratégico 360° para consultas complejas
+    Esta es la función que falta y está siendo llamada desde get_cliente_360()
+    """
+    
+    logger.info(f"🎯 Iniciando análisis estratégico 360° para: {user_query}")
+    
+    # 1. Intentar extracción específica de nombre
+    nombre_candidato = extract_client_from_strategic_query(user_query)
+    
+    if nombre_candidato:
+        logger.info(f"✅ Usando nombre extraído: '{nombre_candidato}'")
+        
+        # 2. Usar sistema robusto SOLO con el nombre limpio
+        cliente_info = identify_cliente_automatico_robusto(nombre_candidato, db_engine)
+        
+        if cliente_info:
+            logger.info(f"✅ Cliente estratégico identificado: {cliente_info['nombre']}")
+            
+            # 3. Usar la misma lógica que el análisis normal
+            datos_erp = get_facturacion_erp_completa(db_engine.connect(), cliente_info['anunciante_id'])
+            
+            if not datos_erp:
+                logger.warning(f"❌ No hay datos para cliente: {cliente_info['nombre']}")
+                return []
+            
+            # 4. Enriquecer con datos AdLens y DNIT
+            datos_enriquecidos = enrich_with_adlens_and_dnit(datos_erp, cliente_info['anunciante_id'], db_engine)
+            
+            # 5. Formatear para Claude con contexto estratégico
+            resultado = {
+                'tipo_analisis': 'estrategico',
+                'cliente': cliente_info['nombre'],
+                'anunciante_id': cliente_info['anunciante_id'],
+                'consulta_original': user_query,
+                'metodo_identificacion': cliente_info.get('method', 'strategic'),
+                'datos_completos': datos_enriquecidos
+            }
+            
+            logger.info(f"✅ Análisis estratégico completado para {cliente_info['nombre']}")
+            return [resultado]
+        
+        else:
+            logger.warning(f"❌ Nombre extraído '{nombre_candidato}' no encontrado en BD")
+    
+    # 3. Fallback: usar identificación normal
+    logger.info("🔄 Fallback: usando identificación normal")
+    cliente_info = identify_cliente_automatico_robusto(user_query, db_engine)
+    
+    if cliente_info:
+        logger.info(f"✅ Cliente fallback identificado: {cliente_info['nombre']}")
+        
+        # Usar análisis normal
+        datos_erp = get_facturacion_erp_completa(db_engine.connect(), cliente_info['anunciante_id'])
+        
+        if datos_erp:
+            datos_enriquecidos = enrich_with_adlens_and_dnit(datos_erp, cliente_info['anunciante_id'], db_engine)
+            return [datos_enriquecidos]
+    
+    logger.warning(f"❌ Cliente no encontrado: {user_query}")
+    return []
+
+
+
+def enrich_with_adlens_and_dnit(datos_erp, anunciante_id, db_engine):
+    """
+    Enriquecer datos ERP con información de AdLens y DNIT
+    Esta función faltaba en el sistema estratégico
+    """
+    
+    try:
+        with db_engine.connect() as conn:
+            # Obtener datos AdLens
+            stmt_adlens = text("""
+                SELECT 
+                    nombre_anunciante,
+                    rubro_principal,
+                    tamano_de_la_empresa_cantidad_de_empleados,
+                    cluster,
+                    tipo_de_cluster,
+                    cultura,
+                    ejecucion,
+                    estructura,
+                    competitividad,
+                    puntaje_total,
+                    CAST(inversion_en_tv_abierta_2024_en_miles_usd AS FLOAT) as inv_tv_usd,
+                    CAST(inversion_en_radio_2024_en_miles_usd AS FLOAT) as inv_radio_usd,
+                    CAST(inversion_en_cable_2024_en_miles_usd AS FLOAT) as inv_cable_usd,
+                    central_de_medios,
+                    tiene_la_empresa_departamento_de_marketing,
+                    en_que_medios_invierte_la_empresa_principalmente,
+                    la_empresa_invierte_en_digital
+                FROM dim_anunciante_perfil
+                WHERE anunciante_id = :anunciante_id
+            """)
+            
+            adlens_data = conn.execute(stmt_adlens, {"anunciante_id": anunciante_id}).fetchone()
+            
+            # Obtener datos DNIT
+            stmt_dnit = text("""
+                SELECT 
+                    ranking,
+                    aporte_gs,
+                    ingreso_estimado_gs,
+                    razon_social
+                FROM dim_posicionamiento_dnit
+                WHERE anunciante_id = :anunciante_id
+            """)
+            
+            dnit_data = conn.execute(stmt_dnit, {"anunciante_id": anunciante_id}).fetchone()
+            
+            # Combinar todos los datos
+            datos_enriquecidos = datos_erp.copy()
+            
+            # Agregar datos AdLens
+            if adlens_data:
+                datos_enriquecidos.update({
+                    'perfil_adlens': {
+                        'nombre': adlens_data.nombre_anunciante,
+                        'rubro': adlens_data.rubro_principal,
+                        'tamaño_empresa': adlens_data.tamano_de_la_empresa_cantidad_de_empleados,
+                        'cluster': adlens_data.cluster,
+                        'tipo_cluster': adlens_data.tipo_de_cluster,
+                        'cultura': adlens_data.cultura,
+                        'ejecucion': adlens_data.ejecucion,
+                        'estructura': adlens_data.estructura,
+                        'competitividad': adlens_data.competitividad,
+                        'puntaje_total': adlens_data.puntaje_total,
+                        'inversiones_usd': {
+                            'tv_abierta': adlens_data.inv_tv_usd or 0,
+                            'radio': adlens_data.inv_radio_usd or 0,
+                            'cable': adlens_data.inv_cable_usd or 0,
+                            'total': (adlens_data.inv_tv_usd or 0) + (adlens_data.inv_radio_usd or 0) + (adlens_data.inv_cable_usd or 0)
+                        },
+                        'organizacion': {
+                            'central_medios': adlens_data.central_de_medios,
+                            'depto_marketing': adlens_data.tiene_la_empresa_departamento_de_marketing,
+                            'medios_principales': adlens_data.en_que_medios_invierte_la_empresa_principalmente,
+                            'invierte_digital': adlens_data.la_empresa_invierte_en_digital
+                        }
+                    }
+                })
+            
+            # Agregar datos DNIT
+            if dnit_data:
+                datos_enriquecidos.update({
+                    'ranking_dnit': {
+                        'ranking': dnit_data.ranking,
+                        'aporte_gs': dnit_data.aporte_gs,
+                        'ingreso_estimado_gs': dnit_data.ingreso_estimado_gs,
+                        'razon_social': dnit_data.razon_social
+                    }
+                })
+            
+            if 'facturacion_total' in datos_enriquecidos:
+                datos_enriquecidos['facturacion_total'] = float(datos_enriquecidos['facturacion_total'])
+            if 'revenue_total' in datos_enriquecidos:
+                datos_enriquecidos['revenue_total'] = float(datos_enriquecidos['revenue_total'])
+            if 'costo_total' in datos_enriquecidos:
+                datos_enriquecidos['costo_total'] = float(datos_enriquecidos['costo_total'])
+
+            logger.info(f"✅ Datos enriquecidos para anunciante {anunciante_id}")
+            logger.info(f"🔍 DEBUG - Facturación en datos enriquecidos: {datos_enriquecidos.get('facturacion_total', 'NO ENCONTRADA')}")
+
+            return datos_enriquecidos
+            
+    except Exception as e:
+        logger.error(f"❌ Error enriqueciendo datos: {e}")
+        # Si hay error, retornar datos ERP originales
+        return datos_erp
