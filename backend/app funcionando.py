@@ -417,43 +417,38 @@ def _mock_response_fallback(query_type, rows, user_query):
         return "Consulta procesada."
 
 def get_top_clientes_enriched(query):
-    """Top clientes por facturación - VERSIÓN FINAL CORRECTA"""
+    """Top 5 clientes por facturación"""
     try:
         with engine.connect() as conn:
             stmt = text("""
                 SELECT 
-                    cliente_original,
+                    d.nombre_canonico,
+                    SUM(f.facturacion)::float as facturacion,
                     COUNT(*) as registros,
-                    SUM(facturacion) as facturacion_total
-                FROM fact_facturacion
-                WHERE cliente_original IS NOT NULL
-                GROUP BY cliente_original
-                ORDER BY facturacion_total DESC
-                LIMIT 10
+                    (SUM(f.facturacion) / NULLIF((SELECT SUM(facturacion) FROM fact_facturacion WHERE facturacion > 0), 0) * 100)::float as market_share
+                FROM dim_anunciante d
+                LEFT JOIN fact_facturacion f ON d.anunciante_id = f.anunciante_id
+                WHERE f.facturacion > 0
+                GROUP BY d.anunciante_id, d.nombre_canonico
+                HAVING SUM(f.facturacion) > 0
+                ORDER BY facturacion DESC
+                LIMIT 5
             """)
             rows = conn.execute(stmt).fetchall()
             
-            # Calcular total para market share
-            total_stmt = text("SELECT SUM(facturacion) FROM fact_facturacion WHERE cliente_original IS NOT NULL")
-            total_result = conn.execute(total_stmt).fetchone()
-            total_facturacion = float(total_result[0]) if total_result[0] else 1
-            
             result = []
             for r in rows:
-                facturacion = float(r[2]) if r[2] else 0
-                market_share = (facturacion / total_facturacion * 100) if total_facturacion > 0 else 0
-                
                 result.append({
                     "cliente": r[0] or "Sin nombre",
-                    "facturacion": facturacion,
-                    "registros": int(r[1]) if r[1] else 0,
-                    "market_share": market_share
+                    "facturacion": float(r[1]) if r[1] else 0,
+                    "registros": int(r[2]) if r[2] else 0,
+                    "market_share": float(r[3]) if r[3] else 0
                 })
             return result
     except Exception as e:
         logger.error(f"Error Top Clientes: {e}")
         return []
-    
+
 def get_facturacion_enriched(query):
     """
     Facturación de un cliente con búsqueda flexible
@@ -1875,172 +1870,7 @@ def send_email_notification(table_name, columns, username, is_new_table=True):
         logger.info(f"De: {sender_email}")
         logger.info(f"Para: {receiver_email}")
         logger.info(f"Tabla: {table_name}")
-    
-@app.route('/api/query-direct', methods=['POST'])
-def query_direct():
-    """Endpoint directo sin Claude - solo BD"""
-    try:
-        data = request.get_json()
-        query = data.get('query', '').lower()
-        
-        # Solo para rankings
-        if not any(word in query for word in ['top', 'ranking', 'clientes', 'principal']):
-            return jsonify({"error": "Solo rankings directos"}), 400
-        
-        with engine.connect() as conn:
-            stmt = text("""
-                SELECT 
-                    cliente_original,
-                    COUNT(*) as registros,
-                    SUM(facturacion) as facturacion_total
-                FROM fact_facturacion
-                WHERE facturacion > 0 
-                    AND anio = 2025
-                    AND cliente_original IS NOT NULL
-                GROUP BY cliente_original
-                ORDER BY facturacion_total DESC
-                LIMIT 10
-            """)
-            rows = conn.execute(stmt).fetchall()
-            
-            # Crear respuesta directa HTML
-            html_response = """
-            <div style="font-family: Arial, sans-serif; margin: 20px;">
-            <h2>🏆 Top 10 Clientes por Facturación 2025 (DATOS DIRECTOS BD)</h2>
-            <table style="border-collapse: collapse; width: 100%; margin-top: 20px;">
-            <tr style="background-color: #f0f0f0; border: 1px solid #ddd;">
-                <th style="padding: 12px; text-align: left; border: 1px solid #ddd;">#</th>
-                <th style="padding: 12px; text-align: left; border: 1px solid #ddd;">Cliente</th>
-                <th style="padding: 12px; text-align: right; border: 1px solid #ddd;">Registros</th>
-                <th style="padding: 12px; text-align: right; border: 1px solid #ddd;">Facturación (Gs)</th>
-            </tr>
-            """
-            
-            for i, row in enumerate(rows, 1):
-                html_response += f"""
-                <tr style="border: 1px solid #ddd;">
-                    <td style="padding: 10px; border: 1px solid #ddd;">{i}</td>
-                    <td style="padding: 10px; border: 1px solid #ddd;">{row[0]}</td>
-                    <td style="padding: 10px; text-align: right; border: 1px solid #ddd;">{row[1]:,}</td>
-                    <td style="padding: 10px; text-align: right; border: 1px solid #ddd;">{float(row[2]):,.0f}</td>
-                </tr>
-                """
-            
-            html_response += """
-            </table>
-            <p style="margin-top: 20px; color: #666; font-size: 14px;">
-            ✅ Datos obtenidos directamente de la base de datos sin procesamiento de Claude.<br>
-            ✅ CERVEPAR debe mostrar: 1,136 registros y 26,057,164,652 Gs<br>
-            ✅ TELEFÓNICA debe mostrar: 186 registros y 9,213,656,412 Gs
-            </p>
-            </div>
-            """
-            
-            return jsonify({
-                "success": True,
-                "response": html_response,
-                "data_source": "BD_DIRECTA"
-            })
-            
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
-
-@app.route('/api/debug-connection', methods=['GET'])
-def debug_connection():
-    """Debug de conexión"""
-    try:
-        with engine.connect() as conn:
-            # Info de conexión
-            db_info = conn.execute(text("SELECT current_database(), current_user")).fetchone()
-            
-            # Total registros
-            total = conn.execute(text("SELECT COUNT(*) FROM fact_facturacion")).fetchone()
-            
-            # CERVEPAR específico
-            cervepar = conn.execute(text("""
-                SELECT COUNT(*), SUM(facturacion) 
-                FROM fact_facturacion 
-                WHERE cliente_original = 'CERVEPAR S.A.'
-            """)).fetchone()
-            
-            return jsonify({
-                "database": db_info[0],
-                "user": db_info[1],
-                "total_registros": total[0],
-                "cervepar_registros": cervepar[0],
-                "cervepar_facturacion": float(cervepar[1]),
-                "connection_string": f"postgresql://postgres:***@localhost/{db_info[0]}"
-            })
-    except Exception as e:
-        return jsonify({"error": str(e)})
-    
-
-@app.route('/api/query-direct-fixed', methods=['POST'])
-def query_direct_fixed():
-    """Endpoint directo CORREGIDO - misma consulta que debug"""
-    try:
-        data = request.get_json()
-        query = data.get('query', '').lower()
-        
-        if not any(word in query for word in ['top', 'ranking', 'clientes', 'principal']):
-            return jsonify({"error": "Solo rankings directos"}), 400
-        
-        with engine.connect() as conn:
-            # LA MISMA CONSULTA QUE USA EL DEBUG QUE FUNCIONA
-            stmt = text("""
-                SELECT 
-                    cliente_original,
-                    COUNT(*) as registros,
-                    SUM(facturacion) as facturacion_total
-                FROM fact_facturacion
-                WHERE cliente_original IS NOT NULL
-                GROUP BY cliente_original
-                ORDER BY facturacion_total DESC
-                LIMIT 10
-            """)
-            rows = conn.execute(stmt).fetchall()
-            
-            html_response = """
-            <div style="font-family: Arial, sans-serif; margin: 20px;">
-            <h2>🏆 Top 10 Clientes CORREGIDO (MISMA CONSULTA QUE DEBUG)</h2>
-            <table style="border-collapse: collapse; width: 100%; margin-top: 20px;">
-            <tr style="background-color: #f0f0f0; border: 1px solid #ddd;">
-                <th style="padding: 12px; text-align: left; border: 1px solid #ddd;">#</th>
-                <th style="padding: 12px; text-align: left; border: 1px solid #ddd;">Cliente</th>
-                <th style="padding: 12px; text-align: right; border: 1px solid #ddd;">Registros</th>
-                <th style="padding: 12px; text-align: right; border: 1px solid #ddd;">Facturación (Gs)</th>
-            </tr>
-            """
-            
-            for i, row in enumerate(rows, 1):
-                html_response += f"""
-                <tr style="border: 1px solid #ddd;">
-                    <td style="padding: 10px; border: 1px solid #ddd;">{i}</td>
-                    <td style="padding: 10px; border: 1px solid #ddd;">{row[0]}</td>
-                    <td style="padding: 10px; text-align: right; border: 1px solid #ddd;">{row[1]:,}</td>
-                    <td style="padding: 10px; text-align: right; border: 1px solid #ddd;">{float(row[2]):,.0f}</td>
-                </tr>
-                """
-            
-            html_response += """
-            </table>
-            <p style="margin-top: 20px; color: #666; font-size: 14px;">
-            ✅ CONSULTA CORREGIDA - Misma que funciona en debug<br>
-            ✅ Debería mostrar CERVEPAR: 1,136 registros, 26,057,164,652 Gs
-            </p>
-            </div>
-            """
-            
-            return jsonify({
-                "success": True,
-                "response": html_response,
-                "data_source": "BD_CORREGIDA"
-            })
-            
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    
 if __name__ == '__main__':
     logger.info("🚀 JARVIS Backend + Tablas Dinámicas iniciando...")
     app.run(host='0.0.0.0', port=5000, debug=True)
