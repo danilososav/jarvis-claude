@@ -454,6 +454,9 @@ def get_top_clientes_enriched(query):
         logger.error(f"Error Top Clientes: {e}")
         return []
     
+
+    # metodo que busca si un cliente tiene busqueda de facturacion o inversion separados o juntos.
+    
 def get_facturacion_enriched(query):
     """
     Facturación de un cliente con búsqueda flexible

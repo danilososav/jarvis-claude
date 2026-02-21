@@ -1,0 +1,159 @@
+/* ApexChartCard.css - Estilos profesionales para gráficos */
+
+.apex-chart-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 20px;
+  margin: 16px 0;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  transition: all 0.3s ease;
+  max-width: 900px;  /* ← AGREGAR: ancho máximo más grande */
+  width: 100%; 
+}
+
+.apex-chart-card:hover {
+  border-color: #58a6ff;
+  box-shadow: 0 6px 24px rgba(88, 166, 255, 0.15);
+}
+
+.chart-header {
+  margin-bottom: 20px;
+  border-bottom: 1px solid #30363d;
+  padding-bottom: 16px;
+}
+
+.chart-title {
+  color: #e6edf3;
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chart-title::before {
+  content: '📊';
+  font-size: 20px;
+}
+
+.chart-description {
+  color: #8b949e;
+  font-size: 13px;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.chart-body {
+  padding: 8px 0;
+}
+
+/* Sobrescribir estilos de ApexCharts para dark theme */
+.apexcharts-canvas {
+  background: transparent !important;
+}
+
+.apexcharts-tooltip {
+  background: #161b22 !important;
+  border: 1px solid #30363d !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3) !important;
+}
+
+.apexcharts-tooltip-title {
+  background: #0d1117 !important;
+  border-bottom: 1px solid #30363d !important;
+  color: #e6edf3 !important;
+  font-weight: 600 !important;
+}
+
+.apexcharts-tooltip-text {
+  color: #e6edf3 !important;
+}
+
+.apexcharts-legend-text {
+  color: #e6edf3 !important;
+}
+
+.apexcharts-xaxis-label,
+.apexcharts-yaxis-label {
+  fill: #8b949e !important;
+}
+
+.apexcharts-gridline {
+  stroke: #30363d !important;
+}
+
+/* Animaciones */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.apex-chart-card {
+  animation: fadeInUp 0.5s ease-out;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .apex-chart-card {
+    padding: 16px;
+    margin: 12px 0;
+  }
+
+  .chart-title {
+    font-size: 16px;
+  }
+
+  .chart-description {
+    font-size: 12px;
+  }
+
+  .chart-body {
+    padding: 4px 0;
+  }
+}
+
+/* Estados */
+.apex-chart-card.loading {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.apex-chart-card.error {
+  border-color: #f85149;
+  background: rgba(248, 81, 73, 0.05);
+}
+
+/* Toolbar customization */
+.apexcharts-toolbar {
+  background: #0d1117 !important;
+  border-radius: 6px;
+  padding: 4px;
+}
+
+.apexcharts-menu-icon {
+  fill: #8b949e !important;
+}
+
+.apexcharts-menu-icon:hover {
+  fill: #58a6ff !important;
+}
+
+/* Mejorar interactividad */
+.apexcharts-bar-area:hover,
+.apexcharts-pie-slice:hover {
+  filter: brightness(1.2);
+  cursor: pointer;
+}
+
+.apexcharts-marker:hover {
+  transform: scale(1.3);
+  transition: transform 0.2s ease;
+}

@@ -177,13 +177,13 @@ export function ImportExport() {
 
   return (
     <>
-      <button
+      {/* <button
         className="import-export-btn"
         onClick={handleOpen}
         title="Import/Export"
       >
         📊 Import/Export
-      </button>
+      </button> */}
 
       {isOpen && (
         <div className="import-export-modal-overlay" onClick={() => setIsOpen(false)}>

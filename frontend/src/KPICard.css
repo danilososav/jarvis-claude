@@ -1,0 +1,234 @@
+/* KPICard.css */
+
+.kpi-card-container {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 20px;
+  margin: 16px 0;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  transition: all 0.3s ease;
+  animation: fadeInKPI 0.5s ease-out;
+}
+
+.kpi-card-container:hover {
+  border-color: #58a6ff;
+  box-shadow: 0 6px 24px rgba(88, 166, 255, 0.15);
+}
+
+/* Header */
+.kpi-header {
+  margin-bottom: 24px;
+  border-bottom: 1px solid #30363d;
+  padding-bottom: 16px;
+}
+
+.kpi-title {
+  color: #e6edf3;
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 8px 0;
+}
+
+.kpi-title::before {
+  content: '📊 ';
+}
+
+.kpi-description {
+  color: #8b949e;
+  font-size: 13px;
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* Grid de KPIs */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+/* Item individual */
+.kpi-item {
+  background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 20px;
+  transition: all 0.3s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.kpi-item::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4px;
+  height: 100%;
+  background: #30363d;
+  transition: all 0.3s ease;
+}
+
+.kpi-item:hover {
+  transform: translateY(-2px);
+  border-color: #58a6ff;
+  box-shadow: 0 4px 12px rgba(88, 166, 255, 0.2);
+}
+
+.kpi-item:hover::before {
+  width: 6px;
+  background: #58a6ff;
+}
+
+/* Estados de KPI */
+.kpi-item.kpi-positive::before {
+  background: #3fb950;
+}
+
+.kpi-item.kpi-negative::before {
+  background: #f85149;
+}
+
+.kpi-item.kpi-neutral::before {
+  background: #8b949e;
+}
+
+/* Label */
+.kpi-label {
+  color: #8b949e;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Value */
+.kpi-value {
+  color: #e6edf3;
+  font-size: 24px;
+  font-weight: 700;
+  font-family: 'Roboto Mono', 'Courier New', monospace;
+  word-break: break-word;
+}
+
+.kpi-item.kpi-positive .kpi-value {
+  color: #3fb950;
+}
+
+.kpi-item.kpi-negative .kpi-value {
+  color: #f85149;
+}
+
+.kpi-item.kpi-neutral .kpi-value {
+  color: #58a6ff;
+}
+
+/* Trend icons */
+.trend-icon {
+  font-size: 18px;
+  font-weight: 700;
+  margin-left: 8px;
+}
+
+.trend-icon.trend-up {
+  color: #3fb950;
+}
+
+.trend-icon.trend-down {
+  color: #f85149;
+}
+
+.trend-icon.trend-neutral {
+  color: #8b949e;
+}
+
+/* Animaciones */
+@keyframes fadeInKPI {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.kpi-item {
+  animation: slideIn 0.4s ease-out;
+  animation-fill-mode: both;
+}
+
+.kpi-item:nth-child(1) { animation-delay: 0.1s; }
+.kpi-item:nth-child(2) { animation-delay: 0.2s; }
+.kpi-item:nth-child(3) { animation-delay: 0.3s; }
+.kpi-item:nth-child(4) { animation-delay: 0.4s; }
+.kpi-item:nth-child(5) { animation-delay: 0.5s; }
+.kpi-item:nth-child(6) { animation-delay: 0.6s; }
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .kpi-card-container {
+    padding: 16px;
+  }
+
+  .kpi-title {
+    font-size: 16px;
+  }
+
+  .kpi-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .kpi-item {
+    padding: 16px;
+  }
+
+  .kpi-value {
+    font-size: 20px;
+  }
+}
+
+@media (max-width: 1024px) and (min-width: 769px) {
+  .kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* Estados especiales */
+.kpi-card-container.loading {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+/* Pulso sutil en valores importantes */
+.kpi-item.kpi-positive .kpi-value,
+.kpi-item.kpi-negative .kpi-value {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}

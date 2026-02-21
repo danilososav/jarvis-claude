@@ -59,9 +59,9 @@ export function SavedResponses() {
 
   return (
     <>
-      <button className="saved-responses-btn" onClick={handleOpen} title="Respuestas Guardadas">
+      {/* <button className="saved-responses-btn" onClick={handleOpen} title="Respuestas Guardadas">
         💾 Respuestas Guardadas
-      </button>
+      </button> */}
 
       {isOpen && (
         <div className="saved-responses-overlay" onClick={() => setIsOpen(false)}>

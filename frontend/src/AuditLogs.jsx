@@ -55,13 +55,13 @@ export function AuditLogs() {
 
   return (
     <>
-      <button
+      {/* <button
         className="audit-btn"
         onClick={handleOpen}
         title="Ver auditoría"
       >
         📋 Auditoría
-      </button>
+      </button> */}
 
       {isOpen && (
         <div className="audit-modal-overlay" onClick={() => setIsOpen(false)}>

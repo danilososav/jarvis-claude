@@ -3,10 +3,11 @@ import axios from 'axios';
 import Cookies from 'js-cookie';
 import { AuthContext } from './Auth';
 import './ChatApp.css';
-import { TopClientesChart, MarketShareChart, ClienteAnalysisChart } from './Charts';
+import { ApexChartCard } from './ApexChartCard';
+import { DataTable } from './DataTable';
+import { KPICard } from './KPICard';
 import './Charts.css';
 import { TrainerMode } from './TrainerMode';
-import { DynamicChart } from './DynamicChart';
 import { UploadExcel } from './UploadExcel';
 import { ImportExport } from './ImportExport';
 import { ExportButtons } from './ExportButtons';
@@ -77,13 +78,56 @@ export default function ChatApp() {
       );
 
       if (res.data.success) {
-        setMessages(p => [...p, { 
-          type: 'bot', 
-          content: res.data.response,
-          query_type: res.data.query_type,
-          chart_config: res.data.chart_config,
-          rows: res.data.rows
-        }]);
+        // Nuevo sistema: backend envía array de respuestas
+        const responses = res.data.responses || [];
+        
+        // Agregar cada respuesta como mensaje separado
+        responses.forEach(response => {
+          if (response.type === 'info') {
+            // Mensaje informativo
+            setMessages(p => [...p, { 
+              type: 'bot',
+              content: response.content,
+              isInfo: true
+            }]);
+          } else if (response.type === 'chart') {
+            // Gráfico
+            setMessages(p => [...p, { 
+              type: 'bot',
+              isChart: true,
+              chart_config: response.chart_config,
+              chart_data: response.data,
+              query_type: response.query_type
+            }]);
+          } else if (response.type === 'table') {
+            // Tabla
+            setMessages(p => [...p, { 
+              type: 'bot',
+              isTable: true,
+              table_config: response.table_config,
+              table_data: response.data,
+              query_type: response.query_type
+            }]);
+          } else if (response.type === 'kpi') {
+            // KPI Card
+            setMessages(p => [...p, { 
+              type: 'bot',
+              isKPI: true,
+              kpi_config: response.kpi_config,
+              kpi_data: response.data,
+              query_type: response.query_type
+            }]);
+          } else if (response.type === 'text') {
+            // Texto de análisis
+            setMessages(p => [...p, { 
+              type: 'bot',
+              content: response.content,
+              query_type: response.query_type,
+              data: response.data
+            }]);
+          }
+        });
+        
         loadHistory();
       } else {
         setMessages(p => [...p, { type: 'error', content: `Error: ${res.data.error}` }]);
@@ -95,18 +139,34 @@ export default function ChatApp() {
     }
   };
 
-  const selectSession = (session) => {
-    setMessages(session.messages.flatMap((m) => [
-      { type: 'user', content: m.query },
-      { 
-        type: 'bot', 
+const selectSession = (session) => {
+  setMessages(session.messages.flatMap((m) => {
+    const messages = [{ type: 'user', content: m.query }];
+    
+    // Si tiene chart_config, crear mensaje de gráfico
+    if (m.chart_config) {
+      messages.push({
+        type: 'bot',
+        isChart: true,
+        chart_config: m.chart_config,
+        chart_data: m.rows,
+        query_type: m.query_type
+      });
+    }
+    
+    // Si tiene texto de respuesta, agregar mensaje de texto
+    if (m.response) {
+      messages.push({
+        type: 'bot',
         content: m.response,
         query_type: m.query_type,
-        chart_config: m.chart_config,
-        rows: m.rows
-      }
-    ]));
-  };
+        data: m.rows
+      });
+    }
+    
+    return messages;
+  }));
+};
 
   const deleteConv = async (id) => {
     try {
@@ -230,19 +290,72 @@ export default function ChatApp() {
             <div className="messages">
               {messages.map((m, i) => (
                 <div key={i}>
-                  <div className={`message ${m.type}`}>
-                    <div className="message-bubble">
-                      {m.content}
-                      {m.type === 'bot' && <TrainerMode message={m} index={i} userQuery={messages[i-1]?.content || ''} />}
+                  {/* Mensaje de usuario */}
+                  {m.type === 'user' && (
+                    <div className="message user">
+                      <div className="message-bubble">{m.content}</div>
                     </div>
-                    {m.type === 'bot' && (
-                      <ExportButtons message={m} chartConfig={m.chart_config} chartData={m.rows} />
-                    )}
-                  </div>
-                  {m.chart_config && m.rows && <DynamicChart data={m.rows} config={m.chart_config} />}
-                  {m.query_type === 'ranking' && m.rows && !m.chart_config && <TopClientesChart data={m.rows} />}
-                  {m.query_type === 'ranking' && m.rows && !m.chart_config && <MarketShareChart data={m.rows} />}
-                  {m.query_type === 'facturacion' && m.rows && !m.chart_config && <ClienteAnalysisChart data={m.rows} />}
+                  )}
+                  
+                  {/* Mensaje de error */}
+                  {m.type === 'error' && (
+                    <div className="message error">
+                      <div className="message-bubble">{m.content}</div>
+                    </div>
+                  )}
+                  
+                  {/* Mensaje informativo */}
+                  {m.type === 'bot' && m.isInfo && (
+                    <div className="message bot">
+                      <div className="message-bubble info-message">{m.content}</div>
+                    </div>
+                  )}
+                  
+                  {/* Gráfico (solo gráfico, sin texto) */}
+                  {m.type === 'bot' && m.isChart && (
+                    <div className="message bot">
+                      <ApexChartCard 
+                        config={m.chart_config} 
+                        data={m.chart_data} 
+                      />
+                    </div>
+                  )}
+                  
+                  {/* Tabla (solo tabla, sin texto) */}
+                  {m.type === 'bot' && m.isTable && (
+                    <div className="message bot">
+                      <DataTable 
+                        config={m.table_config} 
+                        data={m.table_data} 
+                      />
+                    </div>
+                  )}
+                  
+                  {/* KPI Card (solo métricas, sin texto) */}
+                  {m.type === 'bot' && m.isKPI && (
+                    <div className="message bot">
+                      <KPICard 
+                        config={m.kpi_config} 
+                        data={m.kpi_data} 
+                      />
+                    </div>
+                  )}
+                  
+                  {/* Texto de análisis (sin gráfico ni tabla ni KPI) */}
+                  {m.type === 'bot' && !m.isChart && !m.isTable && !m.isKPI && !m.isInfo && m.content && (
+                    <div className="message bot">
+                      <div className="message-bubble">
+                        {m.content}
+                        <TrainerMode 
+                          message={m} 
+                          index={i} 
+                          userQuery={messages[i-1]?.content || ''} 
+                          data={m.data || m.rows || []}
+                        />
+                      </div>
+                      <ExportButtons message={m} chartConfig={null} chartData={m.data} />
+                    </div>
+                  )}
                 </div>
               ))}
               {loading && (
